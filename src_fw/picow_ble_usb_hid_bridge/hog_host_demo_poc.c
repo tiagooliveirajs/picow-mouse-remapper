@@ -20,9 +20,13 @@ uint8_t poc_hids_send_hidpp_long(const uint8_t *payload, uint8_t payload_len)
     // HID++ 2.0 long reports use HID Report ID 0x11. HOGP carries the report
     // ID in the Report Reference descriptor, so payload contains the 19 bytes
     // after the report ID.
-    return hids_host_send_write_report(hids_cid,
-                                       0x11,
-                                       HID_REPORT_TYPE_OUTPUT,
-                                       payload,
-                                       payload_len);
+    //
+    // Pico SDK 2.2.0 vendors BTstack at a revision where the HIDS host API
+    // still uses the hids_client_* naming. The later hids_host_* alias is not
+    // available there, so use the API actually declared by hids_client.h.
+    return hids_client_send_write_report(hids_cid,
+                                         0x11,
+                                         HID_REPORT_TYPE_OUTPUT,
+                                         payload,
+                                         payload_len);
 }
