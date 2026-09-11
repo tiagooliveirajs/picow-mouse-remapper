@@ -64,7 +64,10 @@ target_include_directories(picow_ble_usb_hid_bridge PRIVATE
     )
 target_compile_definitions(picow_ble_usb_hid_bridge PRIVATE
     CYW43_LWIP=0
-    PICO_CORE1_STACK_SIZE=0x2000
+    # RP2350 reserves 4 KiB of SCRATCH_X for the default core1 stack.
+    # Keep the POC within that linker region; if profiling later proves this
+    # insufficient, move core1 to an explicit stack in main SRAM instead.
+    PICO_CORE1_STACK_SIZE=0x1000
     )
 pico_btstack_make_gatt_header(picow_ble_usb_hid_bridge PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/hog_host_demo.gatt
