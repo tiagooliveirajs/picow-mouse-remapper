@@ -23,14 +23,14 @@ if (EXISTS ${picoVscode})
     include(${picoVscode})
 endif()
 # ====================================================================================
-set(PICO_BOARD pico_w CACHE STRING "Board type")
+set(PICO_BOARD pico2_w CACHE STRING "Board type")
 
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
 
 project(picow_ble_usb_hid_bridge C CXX ASM)
 
-# Initialise the Raspberry Pi Pico SDK
+# Initialise the Raspberry Pi SDK
 pico_sdk_init()
 
 add_compile_options(-Wall
@@ -39,14 +39,14 @@ add_compile_options(-Wall
         -Wno-maybe-uninitialized
         )
 
-# Add executable.  
+# Add executable.
 add_executable(picow_ble_usb_hid_bridge
     main.c
     usb_descriptors.c
-    hog_host_demo.c
+    hog_host_demo_poc.c
     picow_bt_example_common.c
     Common.c
-    )  
+    )
 target_link_libraries(picow_ble_usb_hid_bridge
     pico_stdlib
     pico_multicore
@@ -58,14 +58,14 @@ target_link_libraries(picow_ble_usb_hid_bridge
     pico_btstack_classic
     pico_btstack_cyw43
     pico_cyw43_arch_threadsafe_background
-    )   
+    )
 target_include_directories(picow_ble_usb_hid_bridge PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
     )
-target_compile_definitions(picow_ble_usb_hid_bridge PRIVATE 
+target_compile_definitions(picow_ble_usb_hid_bridge PRIVATE
     CYW43_LWIP=0
-    )    
-pico_btstack_make_gatt_header(picow_ble_usb_hid_bridge PRIVATE 
+    )
+pico_btstack_make_gatt_header(picow_ble_usb_hid_bridge PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/hog_host_demo.gatt
     )
 
