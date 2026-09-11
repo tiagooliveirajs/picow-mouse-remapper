@@ -64,6 +64,7 @@ target_include_directories(picow_ble_usb_hid_bridge PRIVATE
     )
 target_compile_definitions(picow_ble_usb_hid_bridge PRIVATE
     CYW43_LWIP=0
+    PICO_CORE1_STACK_SIZE=0x2000
     )
 pico_btstack_make_gatt_header(picow_ble_usb_hid_bridge PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/hog_host_demo.gatt
