@@ -28,6 +28,7 @@
 // @@add
 // =====>
 #include "Common.h"
+#include "pico_hat_ui.h"
 // <=====
 
 //--------------------------------------------------------------------+
@@ -54,6 +55,7 @@ volatile bool g_usb_reinit_request = false; // Flag to request USB re-initializa
 void usb_dev_main(void);
 void hid_task(void);
 void led_blinking_task(void);
+void pico_hat_event_log_task(void);
 bool send_hid_report(void);
 
 extern bool is_ble_app_state_ready(void);
@@ -63,19 +65,23 @@ extern void ble_host_main(void);
 /*------------- MAIN -------------*/
 int main(void)
 {
-    board_init();  
+    board_init();
 
     // init device stack on configured roothub port
     tud_init(BOARD_TUD_RHPORT);
 
     if (board_init_after_tusb) {
         board_init_after_tusb();
-    }      
-    
+    }
+
     // @@chg
     // =====>
     stdio_init_all();
-    CMN_Init(); 
+    CMN_Init();
+
+    // PICO-03: configure the local Waveshare Pico-LCD-1.3 HAT without
+    // blocking USB/BLE. LCD reset/wake-up continues cooperatively in Core0.
+    pico_hat_ui_init();
 
     // Initialize to lock out CPU Core 0 when btstack writes to flash memory on CPU Core 1
     flash_safe_execute_core_init();
@@ -93,15 +99,15 @@ int main(void)
 //--------------------------------------------------------------------+
 // Main loop for the USB device (runs on Core0).
 //--------------------------------------------------------------------+
-// This function loops indefinitely, handling USB events, LED blinking, and HID tasks.
-// It also handles USB re-initialization requests from Core1.
+// USB/HID work is deliberately serviced before LCD/UI work. The LCD task sends
+// at most one 240-pixel row per scheduled step during the PICO-03 test pattern.
 void usb_dev_main(void)
-{    
-    while (1) 
+{
+    while (1)
     {
         // Check for USB re-initialization request from Core1 (BLE host)
         if (g_usb_reinit_request) {
-            g_usb_reinit_request = false; 
+            g_usb_reinit_request = false;
             if (tud_mounted()) {
                 tud_disconnect(); // Disconnect the USB device
                 board_delay(USB_REINIT_STABILIZATION_DELAY); // Wait a bit for stabilization
@@ -111,10 +117,31 @@ void usb_dev_main(void)
             tud_connect();
         }
 
-        tud_task();          // Run TinyUSB device task
-        led_blinking_task(); // Run LED blinking task
-        hid_task();          // Run HID report sending task
+        tud_task();          // Run TinyUSB device task first
+        hid_task();          // Prioritize BLE->USB report forwarding
+        pico_hat_ui_task();  // Cooperative local LCD/input task
+        pico_hat_event_log_task(); // PICO-03 physical-validation diagnostics
+        led_blinking_task();
     }
+}
+
+//--------------------------------------------------------------------+
+// PICO-03 local input diagnostic task.
+//--------------------------------------------------------------------+
+// Log one event per pass so a burst cannot monopolize Core0. This diagnostic is
+// intentionally simple and will be replaced by the menu state machine in the
+// later UX gate.
+void pico_hat_event_log_task(void)
+{
+    pico_hat_event_t event;
+    if (!pico_hat_ui_poll_event(&event)) {
+        return;
+    }
+
+    printf("[PICO-03] %s %s lock=%u\r\n",
+           pico_hat_ui_input_name(event.input),
+           event.pressed ? "DOWN" : "UP",
+           pico_hat_ui_is_screen_locked() ? 1u : 0u);
 }
 // <=====
 
@@ -165,18 +192,18 @@ bool send_hid_report(void)
         if ( tud_suspended()) {
             tud_remote_wakeup();
             return bRet;
-        }                 
+        }
         // If the HID interface is ready, try to send the report
-        if (tud_hid_ready()) {      
+        if (tud_hid_ready()) {
             // Try to send the report
             if (tud_hid_report(0, stHidRpt.report, stHidRpt.report_len)) {
                 // If sent successfully, remove the report from the queue
                 CMN_AdvanceQueue(CMN_QUE_KIND_HID_RPT);
                 bRet = true;
-            }  
+            }
         }
     }
- 
+
     return bRet;
 }
 // <=====
