@@ -29,6 +29,7 @@
 // =====>
 #include "Common.h"
 #include "pico_hat_ui.h"
+#include "pico_hat_diag.h"
 // <=====
 
 //--------------------------------------------------------------------+
@@ -128,15 +129,17 @@ void usb_dev_main(void)
 //--------------------------------------------------------------------+
 // PICO-03 local input diagnostic task.
 //--------------------------------------------------------------------+
-// Log one event per pass so a burst cannot monopolize Core0. This diagnostic is
-// intentionally simple and will be replaced by the menu state machine in the
-// later UX gate.
+// Consume one event per pass so a burst cannot monopolize Core0. Accepted
+// events are logged to UART and mirrored visually on the LCD, allowing the
+// physical gate to be completed without a separate serial adapter.
 void pico_hat_event_log_task(void)
 {
     pico_hat_event_t event;
     if (!pico_hat_ui_poll_event(&event)) {
         return;
     }
+
+    pico_hat_diag_handle_event(&event);
 
     printf("[PICO-03] %s %s lock=%u\r\n",
            pico_hat_ui_input_name(event.input),
@@ -160,7 +163,7 @@ void tud_umount_cb(void)
 }
 
 // Invoked when usb bus is suspended
-// remote_wakeup_en : if host allow us  to perform remote wakeup
+// remote_wakeup_en : if host allow us to perform remote wakeup
 // Within 7ms, device must draw an average of current less than 2.5 mA from bus
 void tud_suspend_cb(bool remote_wakeup_en)
 {
