@@ -47,6 +47,7 @@ add_executable(picow_ble_usb_hid_bridge
     picow_bt_example_common.c
     Common.c
     pico_hat_ui.c
+    pico_hat_diag.c
     )
 target_link_libraries(picow_ble_usb_hid_bridge
     pico_stdlib
