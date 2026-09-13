@@ -37,6 +37,7 @@ static typefirst_peer_t g_tf_current;
 static bool g_tf_have_current;
 static uint32_t g_tf_action_revision;
 static bool g_tf_dirty;
+static ui_screen_t g_tf_last_screen;
 static char g_tf_local_message[UI_TEXT_MAX + 1u];
 
 static const char *tf_target_name(void)
@@ -361,6 +362,7 @@ static void tf_handle_pairing_pressed(pico_hat_input_t input)
         (void)pico07_pairing_request_cancel();
         g_tf_active = false;
         g_device_selection = 0u;
+        g_tf_dirty = true;
         set_screen(SCREEN_DEVICES);
     } else if (input == PICO_HAT_INPUT_KEY3) {
         g_help_return = SCREEN_PAIRING;
@@ -380,6 +382,7 @@ void pico06_ui_init(void)
     g_tf_have_current = false;
     g_tf_action_revision = 0u;
     g_tf_dirty = true;
+    g_tf_last_screen = SCREEN_HOME;
     memset(g_tf_local_message, 0, sizeof(g_tf_local_message));
 }
 
@@ -387,6 +390,15 @@ void pico06_ui_task(void)
 {
     const bool own_devices = g_screen == SCREEN_DEVICES;
     const bool own_pairing = g_screen == SCREEN_PAIRING && g_tf_active;
+
+    // The legacy task can transition HOME -> SCREEN_DEVICES and consume its
+    // own dirty flag in the same tick. Track screen entry independently so the
+    // type-first overlay always redraws its menu on the following tick.
+    if (g_screen != g_tf_last_screen) {
+        g_tf_last_screen = g_screen;
+        g_tf_dirty = true;
+    }
+
     if (!own_devices && !own_pairing) {
         pico06_ui_task_legacy();
         return;
