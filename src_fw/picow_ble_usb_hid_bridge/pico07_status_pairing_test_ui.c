@@ -1,15 +1,15 @@
 // PICO-08 pairing validation UI.
 //
-// The existing PICO-07 test layout is retained while the proven BKB-3G
+// The existing provisional STATUS layout is retained while the proven BKB-3G
 // Bluetooth Classic HID POC is incorporated into the product firmware:
 //
 //   K1 -> BLE mouse pairing
 //   K2 -> Bluetooth Classic BKB-3G keyboard pairing
 //   K3 -> BLE composite pairing
 //
-// Mouse/composite continue through PICO-07 HOGP discovery. Keyboard pairing is
-// intentionally routed to the Classic HID host and can coexist with the BLE
-// mouse without changing the stable USB composite identity.
+// The visible STATUS label intentionally remains generic (`KEYBOARD OPTIONS`)
+// because this is a temporary validation layout. Mouse/composite continue via
+// PICO-07 HOGP discovery; Keyboard Options routes to the Classic HID host.
 
 #define pico06_ui_init pico06_ui_init_legacy
 #define pico06_ui_task pico06_ui_task_legacy
@@ -112,7 +112,7 @@ static void test_render_begin(void)
     if (g_screen == SCREEN_STATUS) {
         set_title("STATUS");
         set_line(1, COLOR_WHITE, "K1: MOUSE OPTIONS");
-        set_line(2, COLOR_WHITE, "K2: CLASSIC KEYBOARD");
+        set_line(2, COLOR_WHITE, "K2: KEYBOARD OPTIONS");
         set_line(3, COLOR_WHITE, "K3: COMPOSITE OPTIONS");
         set_line(5, COLOR_CYAN, "PAIRING TEST LAYOUT");
         set_line(7, COLOR_GRAY, "USB HID STAYS STABLE");
