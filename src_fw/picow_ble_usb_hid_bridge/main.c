@@ -25,34 +25,22 @@
 
 #include "bsp/board_api.h"
 #include "tusb.h"
-// @@add
-// =====>
+
 #include "Common.h"
-#include "pico_hat_ui.h"
+#include "canonical_hid.h"
 #include "pico_hat_diag.h"
-// <=====
+#include "pico_hat_ui.h"
 
-//--------------------------------------------------------------------+
-// MACROS
-//--------------------------------------------------------------------+
-// @@add
-// =====>
-#define USB_REINIT_STABILIZATION_DELAY 100 // ms
 #define LED_BLINKING_INTERVAL 200 // ms
-// <=====
-//--------------------------------------------------------------------+
-// GLOBAL VARIABLES
-//--------------------------------------------------------------------+
-// @@add
-// =====>
-volatile bool g_usb_reinit_request = false; // Flag to request USB re-initialization when BLE HID connection is established
-// <=====
+#define PICO04_PENDING_OUTPUTS 3u
 
-//--------------------------------------------------------------------+
-// FUNCTION PROTOTYPES
-//--------------------------------------------------------------------+
-// @@add
-// =====>
+// Kept only because the PICO-01 BLE host still writes this legacy flag when it
+// reaches READY. PICO-04 deliberately consumes/ignores it: the firmware-owned
+// USB descriptor is stable and must not disconnect/re-enumerate on BLE changes.
+volatile bool g_usb_reinit_request = false;
+
+static volatile bool g_pico04_toggle_left_escape_request = false;
+
 void usb_dev_main(void);
 void hid_task(void);
 void led_blinking_task(void);
@@ -60,78 +48,61 @@ void pico_hat_event_log_task(void);
 bool send_hid_report(void);
 
 extern bool is_ble_app_state_ready(void);
+extern const uint8_t *get_ble_hid_report_descriptor_data(void);
+extern uint16_t get_ble_hid_report_descriptor_len(void);
 extern void ble_host_main(void);
-// <=====
 
 /*------------- MAIN -------------*/
 int main(void)
 {
     board_init();
 
-    // init device stack on configured roothub port
     tud_init(BOARD_TUD_RHPORT);
 
     if (board_init_after_tusb) {
         board_init_after_tusb();
     }
 
-    // @@chg
-    // =====>
     stdio_init_all();
     CMN_Init();
+    canonical_hid_init();
 
-    // PICO-03: configure the local Waveshare Pico-LCD-1.3 HAT without
-    // blocking USB/BLE. LCD reset/wake-up continues cooperatively in Core0.
+    // PICO-03 validated HAT baseline. LCD/input remains cooperative so USB HID
+    // is serviced before local UI work in every Core0 pass.
     pico_hat_ui_init();
 
-    // Initialize to lock out CPU Core 0 when btstack writes to flash memory on CPU Core 1
+    // Lock out Core0 when BTstack performs flash writes on Core1.
     flash_safe_execute_core_init();
-
     multicore_launch_core1(ble_host_main);
 
     usb_dev_main();
-
     return 0;
-    // <=====
 }
 
-// @@add
-// =====>
 //--------------------------------------------------------------------+
-// Main loop for the USB device (runs on Core0).
+// Main loop for the USB device (Core0)
 //--------------------------------------------------------------------+
-// USB/HID work is deliberately serviced before LCD/UI work. The LCD task sends
-// at most one 240-pixel row per scheduled step during the PICO-03 test pattern.
 void usb_dev_main(void)
 {
-    while (1)
-    {
-        // Check for USB re-initialization request from Core1 (BLE host)
+    while (1) {
+        // PICO-04: connecting a BLE device must never change USB identity.
+        // Consume the old POC request without disconnecting TinyUSB.
         if (g_usb_reinit_request) {
             g_usb_reinit_request = false;
-            if (tud_mounted()) {
-                tud_disconnect(); // Disconnect the USB device
-                board_delay(USB_REINIT_STABILIZATION_DELAY); // Wait a bit for stabilization
-            }
-            // Clear any pending HID reports from the queue before reconnecting.
-            CMN_ClearQueue(CMN_QUE_KIND_HID_RPT);
-            tud_connect();
+            printf("[PICO-04] ignored legacy USB re-enumeration request\r\n");
         }
 
-        tud_task();          // Run TinyUSB device task first
-        hid_task();          // Prioritize BLE->USB report forwarding
-        pico_hat_ui_task();  // Cooperative local LCD/input task
-        pico_hat_event_log_task(); // PICO-03 physical-validation diagnostics
+        tud_task();
+        hid_task();
+        pico_hat_ui_task();
+        pico_hat_event_log_task();
         led_blinking_task();
     }
 }
 
 //--------------------------------------------------------------------+
-// PICO-03 local input diagnostic task.
+// Local gate diagnostics
 //--------------------------------------------------------------------+
-// Consume one event per pass so a burst cannot monopolize Core0. Accepted
-// events are logged to UART and mirrored visually on the LCD, allowing the
-// physical gate to be completed without a separate serial adapter.
 void pico_hat_event_log_task(void)
 {
     pico_hat_event_t event;
@@ -141,36 +112,34 @@ void pico_hat_event_log_task(void)
 
     pico_hat_diag_handle_event(&event);
 
-    printf("[PICO-03] %s %s lock=%u\r\n",
+    // PICO-04 validation only: B/KEY2 toggles a volatile Left -> Escape route.
+    // The production profile engine replaces this hook in PICO-06.
+    if (event.input == PICO_HAT_INPUT_KEY2 && event.pressed) {
+        g_pico04_toggle_left_escape_request = true;
+    }
+
+    printf("[PICO-04] %s %s lock=%u\r\n",
            pico_hat_ui_input_name(event.input),
            event.pressed ? "DOWN" : "UP",
            pico_hat_ui_is_screen_locked() ? 1u : 0u);
 }
-// <=====
 
 //--------------------------------------------------------------------+
 // Device callbacks
 //--------------------------------------------------------------------+
-
-// Invoked when device is mounted
 void tud_mount_cb(void)
 {
 }
 
-// Invoked when device is unmounted
 void tud_umount_cb(void)
 {
 }
 
-// Invoked when usb bus is suspended
-// remote_wakeup_en : if host allow us to perform remote wakeup
-// Within 7ms, device must draw an average of current less than 2.5 mA from bus
 void tud_suspend_cb(bool remote_wakeup_en)
 {
-    (void) remote_wakeup_en;
+    (void)remote_wakeup_en;
 }
 
-// Invoked when usb bus is resumed
 void tud_resume_cb(void)
 {
 }
@@ -179,116 +148,150 @@ void tud_resume_cb(void)
 // USB HID
 //--------------------------------------------------------------------+
 
-// @@chg
-// =====>
-// Dequeue and send one HID report from the queue to the USB host.
-// return true if a report was successfully sent, false otherwise.
+// Convert the PICO-01 remote-layout queue into fixed PICO-04 USB reports and
+// send at most one USB report per call. This keeps TinyUSB servicing bounded
+// even when one remote report produces both mouse and keyboard transitions.
 bool send_hid_report(void)
 {
-    static ST_HID_RPT stHidRpt; // Change local variable to static to use static memory (data area) instead of stack, preventing stack overflow.
-    bool bRet = false;
+    static ST_HID_RPT remote_report;
+    static ST_HID_RPT pending[PICO04_PENDING_OUTPUTS];
+    static uint8_t pending_count = 0;
+    static uint8_t pending_index = 0;
+    static bool readiness_initialized = false;
+    static bool previous_ble_ready = false;
 
-    // Peek at the next report in the queue without removing it yet
-    if (CMN_PeekQueue(CMN_QUE_KIND_HID_RPT, &stHidRpt)) {
-        // If the host is suspended, wake it up and exit.
-        // The report will be sent on a subsequent call after the host resumes.
-        if ( tud_suspended()) {
-            tud_remote_wakeup();
-            return bRet;
-        }
-        // If the HID interface is ready, try to send the report
-        if (tud_hid_ready()) {
-            // Try to send the report
-            if (tud_hid_report(0, stHidRpt.report, stHidRpt.report_len)) {
-                // If sent successfully, remove the report from the queue
-                CMN_AdvanceQueue(CMN_QUE_KIND_HID_RPT);
-                bRet = true;
-            }
+    const bool ble_ready = is_ble_app_state_ready();
+    if (!readiness_initialized) {
+        readiness_initialized = true;
+        previous_ble_ready = ble_ready;
+    }
+
+    // A BLE disconnect is a hard state boundary. Drop stale raw/pending traffic
+    // and synthesize neutral mouse/keyboard state before resetting device maps.
+    if (previous_ble_ready && !ble_ready) {
+        pending_index = 0;
+        pending_count = (uint8_t)canonical_hid_neutralize(pending,
+                                                           PICO04_PENDING_OUTPUTS);
+        CMN_ClearQueue(CMN_QUE_KIND_HID_RPT);
+        canonical_hid_reset_device();
+        printf("[PICO-04] BLE disconnect -> neutral USB outputs\r\n");
+    }
+    previous_ble_ready = ble_ready;
+
+    // Local validation toggle is processed on the same Core0 path that owns USB
+    // output so switching modes cannot race a report already being transmitted.
+    if (g_pico04_toggle_left_escape_request && pending_index >= pending_count) {
+        g_pico04_toggle_left_escape_request = false;
+        pending_index = 0;
+        pending_count = (uint8_t)canonical_hid_set_left_escape_test(
+            !canonical_hid_left_escape_test_enabled(),
+            pending,
+            PICO04_PENDING_OUTPUTS);
+    }
+
+    // If no canonical output is pending, translate one queued remote report.
+    if (pending_index >= pending_count) {
+        pending_index = 0;
+        pending_count = 0;
+
+        if (CMN_PeekQueue(CMN_QUE_KIND_HID_RPT, &remote_report)) {
+            pending_count = (uint8_t)canonical_hid_process_remote_report(
+                &remote_report,
+                get_ble_hid_report_descriptor_data(),
+                get_ble_hid_report_descriptor_len(),
+                pending,
+                PICO04_PENDING_OUTPUTS);
+
+            // The remote report has been fully copied/consumed by the canonical
+            // adapter regardless of whether it produced a USB report.
+            CMN_AdvanceQueue(CMN_QUE_KIND_HID_RPT);
         }
     }
 
-    return bRet;
+    if (pending_index >= pending_count) {
+        return false;
+    }
+
+    if (tud_suspended()) {
+        tud_remote_wakeup();
+        return false;
+    }
+
+    if (!tud_hid_ready()) {
+        return false;
+    }
+
+    ST_HID_RPT *output = &pending[pending_index];
+    if (!tud_hid_report(output->report_id, output->report, output->report_len)) {
+        return false;
+    }
+
+    pending_index++;
+    return true;
 }
-// <=====
 
 //--------------------------------------------------------------------+
-// HID TASK
+// HID task
 //--------------------------------------------------------------------+
 void hid_task(void)
 {
-    // @@chg
-    // =====>
-    // Dequeue and send one HID report.
     (void)send_hid_report();
-    // <=====
 }
 
-// Invoked when sent REPORT successfully to host
-// Application can use this to send the next report
-// Note: For composite reports, report[0] is report ID
-void tud_hid_report_complete_cb(uint8_t instance, uint8_t const* report, uint16_t len)
+void tud_hid_report_complete_cb(uint8_t instance,
+                                uint8_t const *report,
+                                uint16_t len)
 {
-    (void) instance;
-    (void) len;
-    // @@chg
-    // =====>
-    (void) report;
-    // <=====
+    (void)instance;
+    (void)report;
+    (void)len;
 }
 
-// Invoked when received GET_REPORT control request
-// Application must fill buffer report's content and return its length.
-// Return zero will cause the stack to STALL request
-uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen)
+uint16_t tud_hid_get_report_cb(uint8_t instance,
+                               uint8_t report_id,
+                               hid_report_type_t report_type,
+                               uint8_t *buffer,
+                               uint16_t reqlen)
 {
-    // TODO not Implemented
-    (void) instance;
-    (void) report_id;
-    (void) report_type;
-    (void) buffer;
-    (void) reqlen;
-
+    (void)instance;
+    (void)report_id;
+    (void)report_type;
+    (void)buffer;
+    (void)reqlen;
     return 0;
 }
 
-// Invoked when received SET_REPORT control request or
-// received data on OUT endpoint ( Report ID = 0, Type = 0 )
-void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize)
+void tud_hid_set_report_cb(uint8_t instance,
+                           uint8_t report_id,
+                           hid_report_type_t report_type,
+                           uint8_t const *buffer,
+                           uint16_t bufsize)
 {
-    (void) instance;
-    // @@chg
-    // =====>
-    (void) report_id;
-    (void) report_type;
-    (void) buffer;
-    (void) bufsize;
-    // <=====
+    (void)instance;
+    (void)report_id;
+    (void)report_type;
+    (void)buffer;
+    (void)bufsize;
 }
 
 //--------------------------------------------------------------------+
-// BLINKING TASK
+// LED task
 //--------------------------------------------------------------------+
 void led_blinking_task(void)
 {
     static uint32_t start_ms = 0;
     static bool led_state = false;
-    // @@chg
-    // =====>
     const uint32_t blink_interval = LED_BLINKING_INTERVAL;
 
     if (is_ble_app_state_ready()) {
-        // Turn on LED when in READY state
         if (!led_state) {
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
             led_state = true;
         }
     } else {
-        // Blink every 200ms when not in READY state
-        if ( board_millis() - start_ms < blink_interval) return; // not enough time
+        if (board_millis() - start_ms < blink_interval) return;
         start_ms += blink_interval;
-
         led_state = !led_state;
         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, led_state);
     }
-    // <=====
 }
