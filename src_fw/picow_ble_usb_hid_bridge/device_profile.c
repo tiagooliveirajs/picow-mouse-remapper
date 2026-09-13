@@ -10,7 +10,7 @@
 
 #define PROFILE_STORE_MAGIC 0x35504d52u /* "RMP5" */
 #define PROFILE_STORE_SCHEMA_VERSION 1u
-#define PROFILE_STORE_MAX_RECORDS 8u
+#define PROFILE_STORE_MAX_RECORDS DEVICE_PROFILE_MAX_RECORDS
 #define PROFILE_STORE_TAG ((((uint32_t)'R') << 24) | (((uint32_t)'M') << 16) | (((uint32_t)'P') << 8) | 'F')
 
 #define PROFILE_QUIRK_BACK    (1u << 0)
@@ -28,12 +28,10 @@
 
 #define HID_USAGE_PAGE_GENERIC_DESKTOP 0x01u
 #define HID_USAGE_PAGE_KEYBOARD        0x07u
-#define HID_USAGE_PAGE_BUTTON          0x09u
 #define HID_USAGE_PAGE_CONSUMER        0x0cu
 #define HID_USAGE_PAGE_VENDOR_MIN      0xff00u
-#define HID_USAGE_X                    0x30u
-#define HID_USAGE_Y                    0x31u
-#define HID_USAGE_WHEEL                0x38u
+#define HID_USAGE_MOUSE                0x02u
+#define HID_USAGE_KEYBOARD             0x06u
 
 #pragma pack(push, 1)
 typedef struct {
@@ -74,6 +72,7 @@ typedef struct {
 static critical_section_t g_snapshot_lock;
 static bool g_initialized;
 static device_profile_snapshot_t g_snapshot;
+static device_profile_catalog_t g_catalog;
 
 static profile_store_v1_t g_store;
 static bool g_store_loaded;
@@ -113,11 +112,42 @@ static void profile_store_reset(void)
     g_store.checksum = profile_store_checksum(&g_store);
 }
 
+static void publish_catalog(void)
+{
+    if (!g_initialized) return;
+
+    device_profile_catalog_t next;
+    memset(&next, 0, sizeof(next));
+    next.storage_ok = g_storage_ok;
+
+    critical_section_enter_blocking(&g_snapshot_lock);
+    next.revision = g_catalog.revision + 1u;
+    critical_section_exit(&g_snapshot_lock);
+
+    for (size_t i = 0; i < PROFILE_STORE_MAX_RECORDS; ++i) {
+        const profile_record_v1_t *record = &g_store.records[i];
+        if (!record->valid || next.count >= DEVICE_PROFILE_MAX_RECORDS) continue;
+        device_profile_saved_record_t *out = &next.records[next.count++];
+        out->valid = true;
+        out->identity_addr_type = record->identity_addr_type;
+        memcpy(out->identity_addr, record->identity_addr, 6);
+        out->bond_index = record->bond_index;
+        out->pnp_valid = record->pnp_valid != 0;
+        out->vendor_id = record->vendor_id;
+        out->product_id = record->product_id;
+        out->product_version = record->product_version;
+        out->capabilities = record->capabilities;
+        out->profile_mode = (device_profile_mode_t)record->profile_mode;
+    }
+
+    critical_section_enter_blocking(&g_snapshot_lock);
+    memcpy(&g_catalog, &next, sizeof(g_catalog));
+    critical_section_exit(&g_snapshot_lock);
+}
+
 static void profile_store_load(void)
 {
-    if (g_store_loaded) {
-        return;
-    }
+    if (g_store_loaded) return;
     g_store_loaded = true;
     profile_store_reset();
 
@@ -127,6 +157,7 @@ static void profile_store_load(void)
     if (tlv_impl == NULL) {
         g_storage_ok = false;
         printf("[PICO-05] TLV unavailable; runtime passthrough only\n");
+        publish_catalog();
         return;
     }
 
@@ -139,6 +170,7 @@ static void profile_store_load(void)
         g_storage_ok = true;
         printf("[PICO-05] profile store empty; schema v%u\n",
                PROFILE_STORE_SCHEMA_VERSION);
+        publish_catalog();
         return;
     }
 
@@ -151,6 +183,7 @@ static void profile_store_load(void)
         g_storage_ok = false;
         printf("[PICO-05] profile store invalid/incompatible; fail-safe passthrough\n");
         profile_store_reset();
+        publish_catalog();
         return;
     }
 
@@ -159,6 +192,7 @@ static void profile_store_load(void)
     printf("[PICO-05] profile store loaded generation=%lu records=%u\n",
            (unsigned long)g_store.generation,
            g_store.record_count);
+    publish_catalog();
 }
 
 static bool profile_store_commit(void)
@@ -168,14 +202,13 @@ static bool profile_store_commit(void)
     btstack_tlv_get_instance(&tlv_impl, &tlv_context);
     if (tlv_impl == NULL) {
         g_storage_ok = false;
+        publish_catalog();
         return false;
     }
 
     uint8_t count = 0;
     for (size_t i = 0; i < PROFILE_STORE_MAX_RECORDS; ++i) {
-        if (g_store.records[i].valid) {
-            ++count;
-        }
+        if (g_store.records[i].valid) ++count;
     }
 
     g_store.magic = PROFILE_STORE_MAGIC;
@@ -193,6 +226,7 @@ static bool profile_store_commit(void)
     if (!g_storage_ok) {
         printf("[PICO-05] profile store commit failed rc=%d\n", result);
     }
+    publish_catalog();
     return g_storage_ok;
 }
 
@@ -200,17 +234,14 @@ static bool identity_matches(const profile_record_v1_t *record,
                              uint8_t addr_type,
                              const uint8_t addr[6])
 {
-    return record->valid &&
-           record->identity_addr_type == addr_type &&
+    return record->valid && record->identity_addr_type == addr_type &&
            memcmp(record->identity_addr, addr, 6) == 0;
 }
 
 static int find_record(uint8_t addr_type, const uint8_t addr[6])
 {
     for (size_t i = 0; i < PROFILE_STORE_MAX_RECORDS; ++i) {
-        if (identity_matches(&g_store.records[i], addr_type, addr)) {
-            return (int)i;
-        }
+        if (identity_matches(&g_store.records[i], addr_type, addr)) return (int)i;
     }
     return -1;
 }
@@ -218,41 +249,81 @@ static int find_record(uint8_t addr_type, const uint8_t addr[6])
 static int find_free_record(void)
 {
     for (size_t i = 0; i < PROFILE_STORE_MAX_RECORDS; ++i) {
-        if (!g_store.records[i].valid) {
-            return (int)i;
-        }
+        if (!g_store.records[i].valid) return (int)i;
     }
     return -1;
 }
 
+static uint32_t hid_item_value(const uint8_t *data, uint8_t size)
+{
+    uint32_t value = 0;
+    for (uint8_t i = 0; i < size; ++i) value |= ((uint32_t)data[i]) << (8u * i);
+    return value;
+}
+
+static uint32_t classify_application_collections(const uint8_t *descriptor,
+                                                 uint16_t descriptor_len)
+{
+    uint32_t capabilities = 0;
+    uint32_t usage_page = 0;
+    uint32_t local_usage = 0;
+    bool have_local_usage = false;
+
+    uint16_t offset = 0;
+    while (offset < descriptor_len) {
+        const uint8_t prefix = descriptor[offset++];
+        if (prefix == 0xfeu) {
+            if (offset + 2u > descriptor_len) break;
+            const uint8_t long_size = descriptor[offset];
+            offset = (uint16_t)(offset + 2u + long_size);
+            continue;
+        }
+
+        uint8_t item_size = prefix & 0x03u;
+        if (item_size == 3u) item_size = 4u;
+        if ((uint32_t)offset + item_size > descriptor_len) break;
+        const uint8_t item_type = (prefix >> 2) & 0x03u;
+        const uint8_t item_tag = (prefix >> 4) & 0x0fu;
+        const uint32_t value = hid_item_value(&descriptor[offset], item_size);
+        offset = (uint16_t)(offset + item_size);
+
+        if (item_type == 1u && item_tag == 0u) {
+            usage_page = value;
+        } else if (item_type == 2u && item_tag == 0u) {
+            local_usage = value;
+            have_local_usage = true;
+        } else if (item_type == 0u && item_tag == 10u) {
+            if (value == 1u && have_local_usage && usage_page == HID_USAGE_PAGE_GENERIC_DESKTOP) {
+                if (local_usage == HID_USAGE_MOUSE) capabilities |= DEVICE_CAP_MOUSE;
+                if (local_usage == HID_USAGE_KEYBOARD) capabilities |= DEVICE_CAP_KEYBOARD;
+            }
+            have_local_usage = false;
+        } else if (item_type == 0u) {
+            have_local_usage = false;
+        }
+    }
+    return capabilities;
+}
+
 static uint32_t classify_capabilities(const uint8_t *descriptor, uint16_t descriptor_len)
 {
-    if (descriptor == NULL || descriptor_len == 0) {
-        return 0;
-    }
+    if (descriptor == NULL || descriptor_len == 0) return 0;
 
-    uint32_t capabilities = 0;
+    // PICO-07 deliberately identifies Mouse/Keyboard by top-level Application
+    // collection. Generic buttons/X/Y alone are not enough because a gamepad
+    // also exposes them and gamepads are outside this product scope.
+    uint32_t capabilities = classify_application_collections(descriptor, descriptor_len);
+
     btstack_hid_usage_iterator_t iterator;
     btstack_hid_usage_iterator_init(&iterator,
                                     descriptor,
                                     descriptor_len,
                                     HID_REPORT_TYPE_INPUT);
-
     while (btstack_hid_usage_iterator_has_more(&iterator)) {
         btstack_hid_usage_item_t item;
         btstack_hid_usage_iterator_get_item(&iterator, &item);
-
-        if ((item.descriptor_item.item_value & 0x01u) != 0) {
-            continue;
-        }
-
-        if (item.usage_page == HID_USAGE_PAGE_BUTTON) {
-            capabilities |= DEVICE_CAP_MOUSE;
-        } else if (item.usage_page == HID_USAGE_PAGE_GENERIC_DESKTOP &&
-                   (item.usage == HID_USAGE_X || item.usage == HID_USAGE_Y ||
-                    item.usage == HID_USAGE_WHEEL)) {
-            capabilities |= DEVICE_CAP_MOUSE;
-        } else if (item.usage_page == HID_USAGE_PAGE_KEYBOARD) {
+        if ((item.descriptor_item.item_value & 0x01u) != 0) continue;
+        if (item.usage_page == HID_USAGE_PAGE_KEYBOARD) {
             capabilities |= DEVICE_CAP_KEYBOARD;
         } else if (item.usage_page == HID_USAGE_PAGE_CONSUMER) {
             capabilities |= DEVICE_CAP_CONSUMER;
@@ -260,16 +331,12 @@ static uint32_t classify_capabilities(const uint8_t *descriptor, uint16_t descri
             capabilities |= DEVICE_CAP_VENDOR_REPORTS;
         }
     }
-
     return capabilities;
 }
 
 static uint8_t qualified_quirk_mask(uint16_t vendor_id, uint16_t product_id)
 {
-    if (vendor_id != LOGITECH_USB_VID) {
-        return 0;
-    }
-
+    if (vendor_id != LOGITECH_USB_VID) return 0;
     switch (product_id) {
         case LOGITECH_LIFT_B031:
             return PROFILE_QUIRK_FORWARD;
@@ -289,26 +356,19 @@ static device_drag_backend_t resolve_backend_for_record(const profile_record_v1_
     if (record == NULL || !record->valid || policy == DEVICE_DRAG_FIX_OFF) {
         return DEVICE_DRAG_BACKEND_STANDARD;
     }
-
     const uint8_t quirk_bit = source == DEVICE_SOURCE_BACK
                                 ? PROFILE_QUIRK_BACK : PROFILE_QUIRK_FORWARD;
-
     if (policy == DEVICE_DRAG_FIX_AUTO) {
         return (record->detected_quirks & quirk_bit) != 0
                  ? DEVICE_DRAG_BACKEND_HIDPP_REPROG_V4
                  : DEVICE_DRAG_BACKEND_STANDARD;
     }
-
     if (policy == DEVICE_DRAG_FIX_FORCE_IF_SUPPORTED) {
-        // FORCE never pretends held-state support exists. Logitech devices with
-        // a PnP identity are eligible for an actual REPROG_CONTROLS_V4 probe in
-        // the remap gate; all others fail closed as unsupported.
         if (record->pnp_valid && record->vendor_id == LOGITECH_USB_VID) {
             return DEVICE_DRAG_BACKEND_PROBE_HIDPP_REPROG_V4;
         }
         return DEVICE_DRAG_BACKEND_UNSUPPORTED;
     }
-
     return DEVICE_DRAG_BACKEND_STANDARD;
 }
 
@@ -365,17 +425,14 @@ static void publish_snapshot(bool connected,
 
 static void update_current_record_metadata(void)
 {
-    if (g_current_slot < 0 || g_current_slot >= (int)PROFILE_STORE_MAX_RECORDS) {
-        return;
-    }
+    if (g_current_slot < 0 || g_current_slot >= (int)PROFILE_STORE_MAX_RECORDS) return;
     memcpy(&g_store.records[g_current_slot], &g_runtime_record, sizeof(g_runtime_record));
+    publish_catalog();
 }
 
 static void apply_pnp_id(const uint8_t *value, uint16_t value_len)
 {
-    if (value == NULL || value_len < 7 || !g_runtime_record.valid) {
-        return;
-    }
+    if (value == NULL || value_len < 7 || !g_runtime_record.valid) return;
 
     g_runtime_record.pnp_valid = 1;
     g_runtime_record.vendor_id_source = value[0];
@@ -384,11 +441,8 @@ static void apply_pnp_id(const uint8_t *value, uint16_t value_len)
     g_runtime_record.product_version = little_endian_read_16(value, 5);
     g_runtime_record.detected_quirks = qualified_quirk_mask(g_runtime_record.vendor_id,
                                                             g_runtime_record.product_id);
-
     update_current_record_metadata();
-    if (g_current_slot >= 0) {
-        (void)profile_store_commit();
-    }
+    if (g_current_slot >= 0) (void)profile_store_commit();
 
     printf("[PICO-05] PnP vid=%04x pid=%04x ver=%04x quirks=0x%02x\n",
            g_runtime_record.vendor_id,
@@ -404,9 +458,7 @@ static void pnp_gatt_event_handler(uint8_t packet_type,
 {
     (void)channel;
     (void)size;
-    if (packet_type != HCI_EVENT_PACKET || g_connection_handle == HCI_CON_HANDLE_INVALID) {
-        return;
-    }
+    if (packet_type != HCI_EVENT_PACKET || g_connection_handle == HCI_CON_HANDLE_INVALID) return;
 
     switch (hci_event_packet_get_type(packet)) {
         case GATT_EVENT_CHARACTERISTIC_VALUE_QUERY_RESULT: {
@@ -418,17 +470,14 @@ static void pnp_gatt_event_handler(uint8_t packet_type,
             }
             break;
         }
-
         case GATT_EVENT_QUERY_COMPLETE: {
             const uint8_t status = gatt_event_query_complete_get_att_status(packet);
             g_pnp_query_active = false;
             printf("[PICO-05] PnP query complete status=0x%02x found=%u\n",
-                   status,
-                   g_pnp_value_seen ? 1u : 0u);
+                   status, g_pnp_value_seen ? 1u : 0u);
             publish_snapshot(true, g_snapshot.profile_restored, true);
             break;
         }
-
         default:
             break;
     }
@@ -437,9 +486,7 @@ static void pnp_gatt_event_handler(uint8_t packet_type,
 static void pnp_query_timer_handler(btstack_timer_source_t *timer)
 {
     (void)timer;
-    if (g_connection_handle == HCI_CON_HANDLE_INVALID || g_pnp_query_active) {
-        return;
-    }
+    if (g_connection_handle == HCI_CON_HANDLE_INVALID || g_pnp_query_active) return;
 
     if (!gatt_client_is_ready(g_connection_handle)) {
         if (++g_pnp_retry_count < PNP_QUERY_MAX_RETRIES) {
@@ -453,12 +500,7 @@ static void pnp_query_timer_handler(btstack_timer_source_t *timer)
     }
 
     const uint8_t status = gatt_client_read_value_of_characteristics_by_uuid16(
-        pnp_gatt_event_handler,
-        g_connection_handle,
-        0x0001u,
-        0xffffu,
-        PNP_ID_UUID);
-
+        pnp_gatt_event_handler, g_connection_handle, 0x0001u, 0xffffu, PNP_ID_UUID);
     if (status == ERROR_CODE_SUCCESS) {
         g_pnp_query_active = true;
         g_pnp_value_seen = false;
@@ -477,12 +519,10 @@ static void pnp_query_timer_handler(btstack_timer_source_t *timer)
 
 void device_profile_init(void)
 {
-    if (g_initialized) {
-        return;
-    }
-
+    if (g_initialized) return;
     critical_section_init(&g_snapshot_lock);
     memset(&g_snapshot, 0, sizeof(g_snapshot));
+    memset(&g_catalog, 0, sizeof(g_catalog));
     g_snapshot.bond_index = -1;
     g_snapshot.profile_mode = DEVICE_PROFILE_PASSTHROUGH;
     g_snapshot.drag_fix_back = DEVICE_DRAG_FIX_AUTO;
@@ -498,9 +538,7 @@ void device_profile_on_hids_ready(hci_con_handle_t connection_handle,
                                   const uint8_t *report_descriptor,
                                   uint16_t report_descriptor_len)
 {
-    if (!g_initialized) {
-        return;
-    }
+    if (!g_initialized) return;
 
     profile_store_load();
     g_connection_handle = connection_handle;
@@ -534,8 +572,7 @@ void device_profile_on_hids_ready(hci_con_handle_t connection_handle,
         g_runtime_record.capabilities = capabilities;
         update_current_record_metadata();
         printf("[PICO-05] restored profile slot=%d mode=%u\n",
-               existing,
-               g_runtime_record.profile_mode);
+               existing, g_runtime_record.profile_mode);
     } else {
         const int free_slot = find_free_record();
         g_runtime_record.valid = 1;
@@ -557,18 +594,17 @@ void device_profile_on_hids_ready(hci_con_handle_t connection_handle,
         } else {
             g_storage_ok = false;
             printf("[PICO-05] profile table full; using volatile passthrough\n");
+            publish_catalog();
         }
     }
 
     printf("[PICO-05] identity bond=%d addr=%s type=%u caps=0x%08lx map=%08lx restored=%u\n",
-           bond_index,
-           bd_addr_to_str(identity_addr),
-           identity_addr_type,
-           (unsigned long)capabilities,
-           (unsigned long)fingerprint,
+           bond_index, bd_addr_to_str(identity_addr), identity_addr_type,
+           (unsigned long)capabilities, (unsigned long)fingerprint,
            restored ? 1u : 0u);
 
     publish_snapshot(true, restored, false);
+    publish_catalog();
 
     btstack_run_loop_remove_timer(&g_pnp_timer);
     g_pnp_retry_count = 0;
@@ -581,10 +617,7 @@ void device_profile_on_hids_ready(hci_con_handle_t connection_handle,
 
 void device_profile_on_disconnect(void)
 {
-    if (!g_initialized) {
-        return;
-    }
-
+    if (!g_initialized) return;
     btstack_run_loop_remove_timer(&g_pnp_timer);
     g_connection_handle = HCI_CON_HANDLE_INVALID;
     g_pnp_query_active = false;
@@ -593,14 +626,50 @@ void device_profile_on_disconnect(void)
 
 bool device_profile_get_snapshot(device_profile_snapshot_t *snapshot)
 {
-    if (!g_initialized || snapshot == NULL) {
-        return false;
-    }
-
+    if (!g_initialized || snapshot == NULL) return false;
     critical_section_enter_blocking(&g_snapshot_lock);
     memcpy(snapshot, &g_snapshot, sizeof(*snapshot));
     critical_section_exit(&g_snapshot_lock);
     return snapshot->revision != 0;
+}
+
+bool device_profile_get_catalog(device_profile_catalog_t *catalog)
+{
+    if (!g_initialized || catalog == NULL) return false;
+    critical_section_enter_blocking(&g_snapshot_lock);
+    memcpy(catalog, &g_catalog, sizeof(*catalog));
+    critical_section_exit(&g_snapshot_lock);
+    return catalog->revision != 0;
+}
+
+bool device_profile_delete_saved(uint8_t addr_type,
+                                 const uint8_t addr[6],
+                                 int16_t *removed_bond_index)
+{
+    if (!g_initialized || addr == NULL) return false;
+    profile_store_load();
+    const int slot = find_record(addr_type, addr);
+    if (slot < 0) return false;
+
+    const int16_t bond_index = g_store.records[slot].bond_index;
+    profile_store_v1_t previous;
+    memcpy(&previous, &g_store, sizeof(previous));
+    memset(&g_store.records[slot], 0, sizeof(g_store.records[slot]));
+
+    if (!profile_store_commit()) {
+        memcpy(&g_store, &previous, sizeof(g_store));
+        publish_catalog();
+        return false;
+    }
+
+    if (g_current_slot == slot || identity_matches(&g_runtime_record, addr_type, addr)) {
+        g_current_slot = -1;
+        memset(&g_runtime_record, 0, sizeof(g_runtime_record));
+    }
+    if (removed_bond_index != NULL) *removed_bond_index = bond_index;
+    printf("[PICO-07] DeviceRecord deleted addr=%s bond=%d\n",
+           bd_addr_to_str(addr), bond_index);
+    return true;
 }
 
 device_drag_backend_t device_profile_resolve_drag_backend(device_source_button_t source,
@@ -616,17 +685,8 @@ device_drag_backend_t device_profile_resolve_drag_backend(device_source_button_t
 
 bool device_profile_forward_hidpp_remap_active(void)
 {
-    if (!g_initialized || !g_runtime_record.valid) {
-        return false;
-    }
-
-    // PICO-05 creates/restores profiles but does not expose a way to activate
-    // remaps. A newly paired device is always passthrough. When PICO-06 owns the
-    // profile engine, DEFAULT_REMAP will use this qualified Forward backend.
-    if (g_runtime_record.profile_mode != DEVICE_PROFILE_DEFAULT_REMAP) {
-        return false;
-    }
-
+    if (!g_initialized || !g_runtime_record.valid) return false;
+    if (g_runtime_record.profile_mode != DEVICE_PROFILE_DEFAULT_REMAP) return false;
     return resolve_backend_for_record(&g_runtime_record,
                                       DEVICE_SOURCE_FORWARD,
                                       (device_drag_fix_policy_t)g_runtime_record.drag_fix_forward) ==
