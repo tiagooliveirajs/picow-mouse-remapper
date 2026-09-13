@@ -532,6 +532,12 @@ void device_profile_init(void)
     g_initialized = true;
 }
 
+void device_profile_core1_prepare(void)
+{
+    if (!g_initialized) return;
+    profile_store_load();
+}
+
 void device_profile_on_hids_ready(hci_con_handle_t connection_handle,
                                   const uint8_t peer_addr[6],
                                   uint8_t peer_addr_type,
