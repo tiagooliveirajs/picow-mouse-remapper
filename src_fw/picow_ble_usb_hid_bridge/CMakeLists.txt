@@ -79,8 +79,9 @@ target_include_directories(picow_ble_usb_hid_bridge PRIVATE
     )
 target_compile_definitions(picow_ble_usb_hid_bridge PRIVATE
     CYW43_LWIP=0
-    # Core1 now services BLE HOGP plus a simultaneous Classic HID Host.
-    PICO_CORE1_STACK_SIZE=0x2000
+    # RP2350 reserves a fixed scratch region for Core1. Keep the proven 4 KiB
+    # stack size; enlarging it to 8 KiB overlaps the Core0 stack at link time.
+    PICO_CORE1_STACK_SIZE=0x1000
     )
 pico_btstack_make_gatt_header(picow_ble_usb_hid_bridge PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/hog_host_demo.gatt
