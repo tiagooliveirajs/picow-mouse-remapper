@@ -21,6 +21,17 @@
 #define LED_BLINKING_INTERVAL 200u
 #define PICO06_PENDING_OUTPUTS 4u
 #define PICO06_CANON_OUTPUTS 2u
+#define PICO08_CORE1_STACK_SIZE_BYTES (8u * 1024u)
+#define PICO08_BT_START_DELAY_MS 500u
+
+// BLE HOGP + Bluetooth Classic HID share Core1. The default RP2350 Core1 stack
+// region used by multicore_launch_core1() cannot safely be enlarged to 8 KiB
+// without colliding with the linker-owned Core0 stack. Allocate the intended
+// 8 KiB stack explicitly in normal SRAM and launch Core1 with it instead.
+static uint32_t g_pico08_core1_stack[PICO08_CORE1_STACK_SIZE_BYTES / sizeof(uint32_t)]
+    __attribute__((aligned(16)));
+static bool g_bluetooth_core_started;
+static uint32_t g_lcd_ready_since_ms;
 
 // Upstream HOGP still raises the legacy request. USB identity is stable from
 // PICO-04 onward, so PICO-08 consumes it without re-enumerating the host.
@@ -35,6 +46,34 @@ extern bool is_ble_app_state_ready(void);
 extern const uint8_t *get_ble_hid_report_descriptor_data(void);
 extern uint16_t get_ble_hid_report_descriptor_len(void);
 extern void ble_host_main(void);
+
+static void maybe_start_bluetooth_core(void)
+{
+    if (g_bluetooth_core_started) return;
+
+    // The LCD initialization/render path is cooperative. Let Core0 complete the
+    // first visible UI before starting the much heavier dual Bluetooth stack.
+    // This also makes a future Core1 fault diagnosable instead of presenting as
+    // a board that never started its screen.
+    if (!pico_hat_ui_is_lcd_ready()) {
+        g_lcd_ready_since_ms = 0u;
+        return;
+    }
+
+    const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    if (g_lcd_ready_since_ms == 0u) {
+        g_lcd_ready_since_ms = now_ms;
+        return;
+    }
+    if ((uint32_t)(now_ms - g_lcd_ready_since_ms) < PICO08_BT_START_DELAY_MS) return;
+
+    printf("[PICO-08] starting BLE+Classic Core1 with %u-byte dedicated stack\r\n",
+           (unsigned)sizeof(g_pico08_core1_stack));
+    g_bluetooth_core_started = true;
+    multicore_launch_core1_with_stack(ble_host_main,
+                                      g_pico08_core1_stack,
+                                      sizeof(g_pico08_core1_stack));
+}
 
 int main(void)
 {
@@ -58,7 +97,8 @@ int main(void)
 
     // BTstack/TLV flash work is kept on Core1; protect Core0 while flash writes.
     flash_safe_execute_core_init();
-    multicore_launch_core1(ble_host_main);
+    g_bluetooth_core_started = false;
+    g_lcd_ready_since_ms = 0u;
 
     usb_dev_main();
     return 0;
@@ -76,6 +116,7 @@ void usb_dev_main(void)
         hid_task();
         pico_hat_ui_task();
         pico06_ui_task();
+        maybe_start_bluetooth_core();
         led_blinking_task();
     }
 }
@@ -220,16 +261,8 @@ void led_blinking_task(void)
     static uint32_t start_ms;
     static bool led_state;
 
-    if (is_ble_app_state_ready()) {
-        if (!led_state) {
-            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
-            led_state = true;
-        }
-        return;
-    }
-
     if (board_millis() - start_ms < LED_BLINKING_INTERVAL) return;
     start_ms += LED_BLINKING_INTERVAL;
+    board_led_write(led_state);
     led_state = !led_state;
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, led_state);
 }
