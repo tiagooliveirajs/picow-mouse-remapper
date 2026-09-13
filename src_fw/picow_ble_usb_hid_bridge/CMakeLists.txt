@@ -42,7 +42,7 @@ add_executable(picow_ble_usb_hid_bridge
     device_profile.c
     remote_hid_queue.c
     pico_hat_ui.c
-    pico_hat_diag.c
+    pico05_status.c
     )
 
 # BTstack and TinyUSB publish overlapping HID type/enumerator names. Keep the
