@@ -20,9 +20,7 @@
 #define PICO_LCD_PIN_RST 12u
 #define PICO_LCD_PIN_BL  13u
 
-// Provisional logical KEY1..KEY4 mapping for the physical validation gate.
-// Waveshare labels these buttons A/B/X/Y. PICO-03 must confirm the desired
-// physical orientation before this mapping becomes release baseline.
+// Physical mapping frozen by the successful PICO-03 hardware gate.
 #define PICO_LCD_PIN_KEY1 15u  // A
 #define PICO_LCD_PIN_KEY2 17u  // B
 #define PICO_LCD_PIN_KEY3 19u  // X
@@ -144,11 +142,10 @@ static void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
 
 static void lcd_configure_panel(void)
 {
-    // Match the Waveshare Pico-LCD-1.3 panel orientation and RGB565 format.
-    lcd_write_command(0x36); // MADCTL
+    lcd_write_command(0x36);
     lcd_write_u8(0x70);
 
-    lcd_write_command(0x3A); // COLMOD: 16-bit RGB565
+    lcd_write_command(0x3A);
     lcd_write_u8(0x05);
 
     lcd_write_command(0xB2);
@@ -194,8 +191,8 @@ static void lcd_configure_panel(void)
     };
     lcd_write_data(gamma_neg, sizeof(gamma_neg));
 
-    lcd_write_command(0x21); // inversion on
-    lcd_write_command(0x11); // sleep out
+    lcd_write_command(0x21);
+    lcd_write_command(0x11);
 }
 
 static void lcd_write_test_row(uint16_t row)
@@ -211,8 +208,6 @@ static void lcd_write_test_row(uint16_t row)
             color = (x < (PICO_LCD_WIDTH / 2u)) ? 0x001Fu : 0xFFFFu;
         }
 
-        // Two asymmetric markers make rotation/mirroring visible during the
-        // physical gate: black at top-left, yellow at bottom-right.
         if (row < 20u && x < 20u) {
             color = 0x0000u;
         } else if (row >= 220u && x >= 220u) {
@@ -229,8 +224,6 @@ static void lcd_write_test_row(uint16_t row)
 
 static void set_backlight(bool enabled)
 {
-    // PICO-03 requires a true backlight-off lock. Brightness/PWM can be added
-    // later without changing the lock semantics.
     gpio_put(PICO_LCD_PIN_BL, enabled);
 }
 
@@ -267,8 +260,6 @@ static void handle_debounced_transition(input_state_t *input, bool pressed)
         set_backlight(!g_screen_locked);
 
         if (!g_screen_locked) {
-            // Ignore orphan transitions from controls that were manipulated
-            // while locked until every non-lock control has been released.
             g_unlock_quarantine = true;
         }
     }
@@ -294,7 +285,7 @@ static void scan_inputs(uint32_t now)
 
     for (size_t i = 0; i < PICO_HAT_INPUT_COUNT; ++i) {
         input_state_t *input = &g_inputs[i];
-        const bool pressed = !gpio_get(input->gpio); // active-low + pull-up
+        const bool pressed = !gpio_get(input->gpio);
 
         if (pressed != input->raw_pressed) {
             input->raw_pressed = pressed;
@@ -342,7 +333,7 @@ static void service_lcd(uint32_t now)
 
         case LCD_INIT_WAIT_SLEEP_OUT:
             if (deadline_reached(now, g_lcd_deadline_ms)) {
-                lcd_write_command(0x29); // display on
+                lcd_write_command(0x29);
                 g_lcd_state = LCD_INIT_READY;
                 g_test_row = 0;
                 g_last_test_row_ms = now;
@@ -414,7 +405,7 @@ void pico_hat_ui_init(void)
     g_last_test_row_ms = now;
 
     printf("[PICO-03] Waveshare Pico-LCD-1.3 baseline init\r\n");
-    printf("[PICO-03] provisional keys: A=KEY1 B=KEY2 X=KEY3 Y=KEY4(lock)\r\n");
+    printf("[PICO-03] keys: A=KEY1 B=KEY2 X=KEY3 Y=KEY4(lock)\r\n");
 }
 
 void pico_hat_ui_task(void)
@@ -438,6 +429,11 @@ bool pico_hat_ui_poll_event(pico_hat_event_t *event)
 bool pico_hat_ui_is_screen_locked(void)
 {
     return g_screen_locked;
+}
+
+bool pico_hat_ui_is_lcd_ready(void)
+{
+    return g_lcd_state == LCD_INIT_READY && g_test_row >= PICO_LCD_HEIGHT;
 }
 
 const char *pico_hat_ui_input_name(pico_hat_input_t input)
