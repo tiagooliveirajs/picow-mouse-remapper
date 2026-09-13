@@ -27,7 +27,7 @@ typedef enum {
 
 typedef struct {
     device_profile_mode_t mode;
-    uint8_t mappings[REMAP_SOURCE_COUNT]; // target enum per physical source
+    uint8_t mappings[REMAP_SOURCE_COUNT];
     device_drag_fix_policy_t drag_fix_back;
     device_drag_fix_policy_t drag_fix_forward;
 } remap_profile_config_t;
@@ -45,16 +45,15 @@ typedef struct {
 } remap_profile_snapshot_t;
 
 void remap_profile_init(void);
-
-// Core1 task. It follows the identity published by device_profile, restores the
-// matching saved remap, and performs requested TLV commits away from Core0 USB.
 void remap_profile_core1_task(void);
-
 bool remap_profile_get_snapshot(remap_profile_snapshot_t *snapshot);
 
-// Non-blocking Core0 request. The returned id can be observed in last_apply_id.
 bool remap_profile_request_apply(const remap_profile_config_t *config,
                                  uint32_t *request_id);
+
+// Core1-only PICO-07 destructive operation used together with bond/DeviceRecord
+// deletion. It removes the saved remap/drag overrides for one identity.
+bool remap_profile_delete_saved(uint8_t addr_type, const uint8_t addr[6]);
 
 void remap_profile_make_passthrough(remap_profile_config_t *config);
 void remap_profile_make_default(remap_profile_config_t *config);

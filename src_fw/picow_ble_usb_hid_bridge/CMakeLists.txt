@@ -45,7 +45,7 @@ add_executable(picow_ble_usb_hid_bridge
     logitech_hidpp.c
     remap_engine.c
     pico_hat_ui.c
-    pico06_ui_v2.c
+    pico07_status_pairing_test_ui.c
     )
 
 # BTstack and TinyUSB publish overlapping HID identifiers. Keep the PICO-05
@@ -53,6 +53,13 @@ add_executable(picow_ble_usb_hid_bridge
 # header. SDK 2.2.0 defines critical_section_t in pico/critical_section.h.
 set_source_files_properties(device_profile.c PROPERTIES
     COMPILE_OPTIONS "-include;btstack.h;-include;pico/critical_section.h")
+
+# PICO-07 keyboard-pairing validation: keep discovery open for 50 seconds
+# instead of the transport demo's 5-second scan window. The override is scoped
+# to the HOGP wrapper translation unit and leaves the 8-second connect timeout
+# untouched.
+set_source_files_properties(hog_host_demo_poc.c PROPERTIES
+    COMPILE_OPTIONS "-include;${CMAKE_CURRENT_LIST_DIR}/pico07_scan_timeout_override.h")
 
 target_link_libraries(picow_ble_usb_hid_bridge
     pico_stdlib

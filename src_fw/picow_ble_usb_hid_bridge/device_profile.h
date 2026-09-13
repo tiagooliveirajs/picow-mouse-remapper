@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define DEVICE_PROFILE_MAX_RECORDS 8u
+
 typedef enum {
     DEVICE_CAP_MOUSE          = 1u << 0,
     DEVICE_CAP_KEYBOARD       = 1u << 1,
@@ -62,7 +64,31 @@ typedef struct {
     device_drag_backend_t auto_forward_backend;
 } device_profile_snapshot_t;
 
+typedef struct {
+    bool valid;
+    uint8_t identity_addr_type;
+    uint8_t identity_addr[6];
+    int16_t bond_index;
+    bool pnp_valid;
+    uint16_t vendor_id;
+    uint16_t product_id;
+    uint16_t product_version;
+    uint32_t capabilities;
+    device_profile_mode_t profile_mode;
+} device_profile_saved_record_t;
+
+typedef struct {
+    uint32_t revision;
+    bool storage_ok;
+    uint8_t count;
+    device_profile_saved_record_t records[DEVICE_PROFILE_MAX_RECORDS];
+} device_profile_catalog_t;
+
 void device_profile_init(void);
+
+// Core1-only startup hook. Loads/publishes the persistent device catalog even
+// when no BLE peer can connect, so Saved Devices remains usable offline.
+void device_profile_core1_prepare(void);
 
 // The connection handle is represented as its 16-bit wire/runtime value here
 // so this public header does not import BTstack HID types into TinyUSB code.
@@ -74,6 +100,17 @@ void device_profile_on_hids_ready(uint16_t connection_handle,
 
 void device_profile_on_disconnect(void);
 bool device_profile_get_snapshot(device_profile_snapshot_t *snapshot);
+
+bool device_profile_get_catalog(device_profile_catalog_t *catalog);
+bool device_profile_delete_saved(uint8_t addr_type,
+                                 const uint8_t addr[6],
+                                 int16_t *removed_bond_index);
+
+// Core1-only best-effort metadata synchronization. The canonical remap config
+// remains owned by remap_profile; this copy is only the Saved Devices summary.
+bool device_profile_update_profile_summary(device_profile_mode_t mode,
+                                           device_drag_fix_policy_t back,
+                                           device_drag_fix_policy_t forward);
 
 device_drag_backend_t device_profile_resolve_drag_backend(device_source_button_t source,
                                                           device_drag_fix_policy_t policy);
