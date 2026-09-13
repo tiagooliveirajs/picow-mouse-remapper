@@ -38,8 +38,6 @@ static canon_report_map_t g_maps[CANON_REPORT_MAP_SLOTS];
 static const uint8_t *g_descriptor;
 static uint16_t g_descriptor_len;
 static uint8_t g_button_state;
-static bool g_escape_pressed;
-static bool g_left_escape_test;
 
 static bool report_id_matches(uint16_t descriptor_report_id, uint8_t report_id)
 {
@@ -238,30 +236,11 @@ static void write_mouse_report(ST_HID_RPT *output,
     output->report[6] = (uint8_t)pan;
 }
 
-static void write_keyboard_escape_report(ST_HID_RPT *output, bool pressed)
-{
-    memset(output, 0, sizeof(*output));
-    output->report_id = REPORT_ID_KEYBOARD;
-    output->report_len = 8u;
-    if (pressed) {
-        // USB HID Keyboard/Keypad usage 0x29 = Escape.
-        output->report[2] = 0x29u;
-    }
-}
-
-static uint8_t current_usb_mouse_buttons(void)
-{
-    return g_left_escape_test ? (uint8_t)(g_button_state & (uint8_t)~0x01u)
-                              : g_button_state;
-}
-
 void canonical_hid_init(void)
 {
     g_descriptor = NULL;
     g_descriptor_len = 0;
     g_button_state = 0;
-    g_escape_pressed = false;
-    g_left_escape_test = false;
     reset_maps();
 }
 
@@ -270,7 +249,6 @@ void canonical_hid_reset_device(void)
     g_descriptor = NULL;
     g_descriptor_len = 0;
     g_button_state = 0;
-    g_escape_pressed = false;
     reset_maps();
 }
 
@@ -336,72 +314,22 @@ size_t canonical_hid_process_remote_report(const ST_HID_RPT *input,
     const int8_t pan = field_fits(&map->pan, payload_len)
                          ? clamp_i8(read_signed_bits(payload, payload_len, &map->pan)) : 0;
 
-    size_t count = 0;
-    write_mouse_report(&outputs[count++], current_usb_mouse_buttons(), x, y, wheel, pan);
-
-    const bool desired_escape = g_left_escape_test && ((g_button_state & 0x01u) != 0);
-    if (desired_escape != g_escape_pressed && count < output_capacity) {
-        g_escape_pressed = desired_escape;
-        write_keyboard_escape_report(&outputs[count++], g_escape_pressed);
-    }
-
-    return count;
+    write_mouse_report(&outputs[0], g_button_state, x, y, wheel, pan);
+    return 1;
 }
 
 size_t canonical_hid_neutralize(ST_HID_RPT *outputs, size_t output_capacity)
 {
     if (outputs == NULL || output_capacity == 0) {
         g_button_state = 0;
-        g_escape_pressed = false;
         return 0;
     }
 
-    size_t count = 0;
-    if (g_button_state != 0 && count < output_capacity) {
-        g_button_state = 0;
-        write_mouse_report(&outputs[count++], 0, 0, 0, 0, 0);
-    } else {
-        g_button_state = 0;
-    }
-
-    if (g_escape_pressed && count < output_capacity) {
-        g_escape_pressed = false;
-        write_keyboard_escape_report(&outputs[count++], false);
-    } else {
-        g_escape_pressed = false;
-    }
-
-    return count;
-}
-
-size_t canonical_hid_set_left_escape_test(bool enabled,
-                                          ST_HID_RPT *outputs,
-                                          size_t output_capacity)
-{
-    if (g_left_escape_test == enabled) {
+    if (g_button_state == 0) {
         return 0;
     }
 
-    g_left_escape_test = enabled;
-    if (outputs == NULL || output_capacity == 0) {
-        g_escape_pressed = enabled && ((g_button_state & 0x01u) != 0);
-        return 0;
-    }
-
-    size_t count = 0;
-    write_mouse_report(&outputs[count++], current_usb_mouse_buttons(), 0, 0, 0, 0);
-
-    const bool desired_escape = enabled && ((g_button_state & 0x01u) != 0);
-    if (desired_escape != g_escape_pressed && count < output_capacity) {
-        g_escape_pressed = desired_escape;
-        write_keyboard_escape_report(&outputs[count++], g_escape_pressed);
-    }
-
-    printf("[PICO-04] Left->Escape validation %s\r\n", enabled ? "ON" : "OFF");
-    return count;
-}
-
-bool canonical_hid_left_escape_test_enabled(void)
-{
-    return g_left_escape_test;
+    g_button_state = 0;
+    write_mouse_report(&outputs[0], 0, 0, 0, 0, 0);
+    return 1;
 }
