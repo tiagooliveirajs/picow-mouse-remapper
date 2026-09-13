@@ -1,8 +1,6 @@
 #include <stdio.h>
 
 #include "bsp/board_api.h"
-#include "btstack.h"
-#include "pico/cyw43_arch.h"
 #include "pico/flash.h"
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
@@ -12,25 +10,12 @@
 
 #define USB_REINIT_STABILIZATION_DELAY_MS 100
 
-void bkb3g_classic_hid_init(void);
+// Implemented in bkb3g_classic_hid.c so BTstack headers never share a
+// translation unit with TinyUSB HID headers. Both stacks define a
+// hid_report_type_t type, so keeping them isolated avoids a C type collision.
+void bkb3g_classic_hid_core_main(void);
 
 volatile bool g_usb_reinit_request = false;
-
-static void bluetooth_core_main(void) {
-    printf("\n=== Remapper BKB-3G Classic HID -> USB HID POC ===\n");
-    printf("Target: Bluetooth keyboard 3.0 / BKB-3G\n");
-    printf("Bluetooth side: Classic HID Host (BR/EDR)\n");
-    printf("USB side: TinyUSB HID Device\n\n");
-
-    if (cyw43_arch_init() != PICO_OK) {
-        panic("cyw43_arch_init failed");
-    }
-
-    bkb3g_classic_hid_init();
-    btstack_run_loop_execute();
-
-    cyw43_arch_deinit();
-}
 
 static bool send_next_usb_hid_report(void) {
     static ST_HID_RPT report;
@@ -98,7 +83,7 @@ int main(void) {
     // safe execution can coordinate both cores.
     flash_safe_execute_core_init();
 
-    multicore_launch_core1(bluetooth_core_main);
+    multicore_launch_core1(bkb3g_classic_hid_core_main);
     usb_device_task();
 
     return 0;
