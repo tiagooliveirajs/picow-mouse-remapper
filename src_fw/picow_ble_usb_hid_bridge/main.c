@@ -8,7 +8,9 @@
 
 #include "Common.h"
 #include "canonical_hid.h"
+#include "classic_keyboard.h"
 #include "device_profile.h"
+#include "keyboard_hid_queue.h"
 #include "logitech_hidpp.h"
 #include "pico06_ui.h"
 #include "pico_hat_ui.h"
@@ -21,7 +23,7 @@
 #define PICO06_CANON_OUTPUTS 2u
 
 // Upstream HOGP still raises the legacy request. USB identity is stable from
-// PICO-04 onward, so PICO-06 consumes it without re-enumerating the host.
+// PICO-04 onward, so PICO-08 consumes it without re-enumerating the host.
 volatile bool g_usb_reinit_request = false;
 
 void usb_dev_main(void);
@@ -41,9 +43,11 @@ int main(void)
     if (board_init_after_tusb) board_init_after_tusb();
 
     stdio_init_all();
-    CMN_Init(); // legacy helper storage; active HOGP path uses remote_hid_queue
+    CMN_Init(); // legacy helper storage; active transports use dedicated queues
     canonical_hid_init();
     remote_hid_queue_init();
+    keyboard_hid_queue_init();
+    classic_keyboard_shared_init();
     device_profile_init();
     remap_profile_init();
     logitech_hidpp_init();
@@ -65,7 +69,7 @@ void usb_dev_main(void)
     while (1) {
         if (g_usb_reinit_request) {
             g_usb_reinit_request = false;
-            printf("[PICO-06] ignored legacy USB re-enumeration request\r\n");
+            printf("[PICO-08] ignored legacy USB re-enumeration request\r\n");
         }
 
         tud_task();
@@ -83,6 +87,7 @@ void tud_resume_cb(void) {}
 
 bool send_hid_report(void)
 {
+    static ST_HID_RPT keyboard_report;
     static ST_HID_RPT remote_report;
     static ST_HID_RPT canonical[PICO06_CANON_OUTPUTS];
     static ST_HID_RPT pending[PICO06_PENDING_OUTPUTS];
@@ -104,9 +109,27 @@ bool send_hid_report(void)
         remote_hid_queue_clear();
         canonical_hid_reset_device();
         remap_engine_reset_device();
-        printf("[PICO-06] BLE disconnect -> neutral USB outputs\r\n");
+        printf("[PICO-08] BLE mouse disconnect -> neutral mouse outputs\r\n");
     }
     previous_ble_ready = ble_ready;
+
+    // Keyboard transport is independent from the BLE mouse/remap pipeline.
+    // Its reports are already normalized to the firmware-owned USB Keyboard
+    // Report ID 1, so they bypass canonical mouse processing completely.
+    if (keyboard_hid_queue_peek(&keyboard_report)) {
+        if (tud_suspended()) {
+            tud_remote_wakeup();
+            return false;
+        }
+        if (!tud_hid_ready()) return false;
+        if (!tud_hid_report(keyboard_report.report_id,
+                            keyboard_report.report,
+                            keyboard_report.report_len)) {
+            return false;
+        }
+        keyboard_hid_queue_advance();
+        return true;
+    }
 
     if (pending_index >= pending_count) {
         pending_index = 0;
