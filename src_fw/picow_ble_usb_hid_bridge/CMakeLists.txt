@@ -46,6 +46,7 @@ add_executable(picow_ble_usb_hid_bridge
     hog_host_demo_poc.c
     picow_bt_example_common.c
     Common.c
+    canonical_hid.c
     pico_hat_ui.c
     pico_hat_diag.c
     )
