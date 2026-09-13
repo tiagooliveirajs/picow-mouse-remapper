@@ -5,18 +5,17 @@
 #include <string.h>
 
 #include "btstack.h"
-#include "tusb.h"
 #include "usb_descriptors.h"
 
 #define CANON_REPORT_MAP_SLOTS 12u
 #define CANON_BUTTON_COUNT 5u
-#define HID_USAGE_PAGE_GENERIC_DESKTOP 0x01u
-#define HID_USAGE_PAGE_BUTTON 0x09u
-#define HID_USAGE_PAGE_CONSUMER 0x0cu
-#define HID_USAGE_X 0x30u
-#define HID_USAGE_Y 0x31u
-#define HID_USAGE_WHEEL 0x38u
-#define HID_USAGE_AC_PAN 0x0238u
+#define CANON_USAGE_PAGE_GENERIC_DESKTOP 0x01u
+#define CANON_USAGE_PAGE_BUTTON 0x09u
+#define CANON_USAGE_PAGE_CONSUMER 0x0cu
+#define CANON_USAGE_X 0x30u
+#define CANON_USAGE_Y 0x31u
+#define CANON_USAGE_WHEEL 0x38u
+#define CANON_USAGE_AC_PAN 0x0238u
 
 typedef struct {
     bool valid;
@@ -167,7 +166,7 @@ static canon_report_map_t *get_report_map(uint8_t report_id,
             continue;
         }
 
-        if (item.usage_page == HID_USAGE_PAGE_BUTTON &&
+        if (item.usage_page == CANON_USAGE_PAGE_BUTTON &&
             item.usage >= 1u && item.usage <= CANON_BUTTON_COUNT &&
             item.size == 1u) {
             canon_field_t *button = &map->buttons[item.usage - 1u];
@@ -186,12 +185,12 @@ static canon_report_map_t *get_report_map(uint8_t report_id,
         }
 
         canon_field_t *field = NULL;
-        if (item.usage_page == HID_USAGE_PAGE_GENERIC_DESKTOP) {
-            if (item.usage == HID_USAGE_X) field = &map->x;
-            else if (item.usage == HID_USAGE_Y) field = &map->y;
-            else if (item.usage == HID_USAGE_WHEEL) field = &map->wheel;
-        } else if (item.usage_page == HID_USAGE_PAGE_CONSUMER &&
-                   item.usage == HID_USAGE_AC_PAN) {
+        if (item.usage_page == CANON_USAGE_PAGE_GENERIC_DESKTOP) {
+            if (item.usage == CANON_USAGE_X) field = &map->x;
+            else if (item.usage == CANON_USAGE_Y) field = &map->y;
+            else if (item.usage == CANON_USAGE_WHEEL) field = &map->wheel;
+        } else if (item.usage_page == CANON_USAGE_PAGE_CONSUMER &&
+                   item.usage == CANON_USAGE_AC_PAN) {
             field = &map->pan;
         }
 
