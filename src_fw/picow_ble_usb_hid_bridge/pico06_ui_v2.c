@@ -25,7 +25,7 @@
 // y=238. A tenth line would start at y=251, so nine is the physical maximum
 // with the current font/spacing.
 #define UI_LINE_COUNT 9u
-#define UI_TEXT_MAX 20u
+#define UI_TEXT_MAX 21u
 #define GLYPH_SCALE 2u
 #define GLYPH_W 5u
 #define GLYPH_H 7u
