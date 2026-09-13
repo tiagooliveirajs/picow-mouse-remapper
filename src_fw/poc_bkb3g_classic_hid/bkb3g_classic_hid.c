@@ -318,11 +318,13 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         case HCI_EVENT_HID_META:
             switch (hci_event_hid_meta_get_subevent_code(packet)) {
                 case HID_SUBEVENT_INCOMING_CONNECTION:
-                    if (hid_subevent_incoming_connection_get_status(packet) == ERROR_CODE_SUCCESS) {
-                        hid_host_cid = hid_subevent_incoming_connection_get_hid_cid(packet);
-                        printf("Incoming HID connection, cid=0x%04x. Accepting.\n", hid_host_cid);
-                        hid_host_accept_connection(hid_host_cid, HID_PROTOCOL_MODE_REPORT);
-                    }
+                    // Match the HID Host API available in the repository's Pico SDK 2.2.0.
+                    // In that BTstack revision this event is accepted directly by HID CID.
+                    hid_host_cid = hid_subevent_incoming_connection_get_hid_cid(packet);
+                    app_state = APP_CONNECTING;
+                    gap_inquiry_stop();
+                    printf("Incoming HID connection, cid=0x%04x. Accepting.\n", hid_host_cid);
+                    hid_host_accept_connection(hid_host_cid, HID_PROTOCOL_MODE_REPORT);
                     break;
 
                 case HID_SUBEVENT_CONNECTION_OPENED: {
