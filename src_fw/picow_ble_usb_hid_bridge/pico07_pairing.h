@@ -39,7 +39,7 @@ typedef struct {
     pico07_scan_result_t results[PICO07_MAX_SCAN_RESULTS];
     pico07_device_type_t last_type;
     bool last_was_new_pair;
-    char message[21];
+    char message[22]; // 21 visible UI characters + NUL
 } pico07_pairing_snapshot_t;
 
 void pico07_pairing_init(void);
