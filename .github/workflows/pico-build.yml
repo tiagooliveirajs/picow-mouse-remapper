@@ -7,6 +7,7 @@ on:
       - feat/pico-04-canonical-hid-usb-composite
       - feat/pico-05-device-identity-profiles
       - feat/pico-06-default-custom-remapper
+      - feat/pico-07-pairing-saved-devices
   pull_request:
     paths:
       - 'src_fw/**'
@@ -44,6 +45,6 @@ jobs:
       - name: Publish UF2
         uses: actions/upload-artifact@v4
         with:
-          name: pico2w-pico06-ui-revision-uf2
+          name: pico2w-pico07-pairing-uf2
           path: build/picow_ble_usb_hid_bridge/picow_ble_usb_hid_bridge.uf2
           if-no-files-found: error
