@@ -41,14 +41,16 @@ add_executable(picow_ble_usb_hid_bridge
     canonical_hid.c
     device_profile.c
     remote_hid_queue.c
+    remap_profile.c
+    logitech_hidpp.c
+    remap_engine.c
     pico_hat_ui.c
-    pico05_status.c
+    pico06_ui.c
     )
 
-# BTstack and TinyUSB publish overlapping HID type/enumerator names. Keep the
-# BTstack-only profile implementation isolated instead of exposing btstack.h
-# through device_profile.h into main.c/TinyUSB. The Pico critical-section API
-# lives in pico/critical_section.h in SDK 2.2.0.
+# BTstack and TinyUSB publish overlapping HID identifiers. Keep the PICO-05
+# identity implementation isolated instead of exposing btstack.h in its public
+# header. SDK 2.2.0 defines critical_section_t in pico/critical_section.h.
 set_source_files_properties(device_profile.c PROPERTIES
     COMPILE_OPTIONS "-include;btstack.h;-include;pico/critical_section.h")
 
