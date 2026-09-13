@@ -101,12 +101,16 @@ void device_profile_on_hids_ready(uint16_t connection_handle,
 void device_profile_on_disconnect(void);
 bool device_profile_get_snapshot(device_profile_snapshot_t *snapshot);
 
-// PICO-07 saved-device catalog. The catalog is a Core0-safe snapshot of the
-// persistent DeviceRecord table. Delete is a Core1-only operation.
 bool device_profile_get_catalog(device_profile_catalog_t *catalog);
 bool device_profile_delete_saved(uint8_t addr_type,
                                  const uint8_t addr[6],
                                  int16_t *removed_bond_index);
+
+// Core1-only best-effort metadata synchronization. The canonical remap config
+// remains owned by remap_profile; this copy is only the Saved Devices summary.
+bool device_profile_update_profile_summary(device_profile_mode_t mode,
+                                           device_drag_fix_policy_t back,
+                                           device_drag_fix_policy_t forward);
 
 device_drag_backend_t device_profile_resolve_drag_backend(device_source_button_t source,
                                                           device_drag_fix_policy_t policy);
