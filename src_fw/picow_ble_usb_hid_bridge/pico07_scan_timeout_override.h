@@ -108,22 +108,10 @@ static inline bool pico07_adv_is_preferred_peer(void)
                   sizeof(pico07_last_adv_addr)) == 0;
 }
 
-static inline bool pico07_ad_data_contains_hid_compatible(
+static inline bool pico07_ad_has_hid_appearance(
     uint8_t ad_len,
-    const uint8_t *ad_data,
-    uint16_t uuid16)
+    const uint8_t *ad_data)
 {
-    if (uuid16 != ORG_BLUETOOTH_SERVICE_HUMAN_INTERFACE_DEVICE) {
-        return ad_data_contains_uuid16(ad_len, ad_data, uuid16);
-    }
-
-    // During Pair Mouse/Keyboard/Composite, do not immediately reconnect the
-    // preferred mouse that was just disconnected to free the single HIDS slot.
-    // Targeted preferred-device recovery uses g_reconnect_scan_only and is not
-    // filtered here.
-    if (pico07_adv_is_preferred_peer()) return false;
-
-    if (ad_data_contains_uuid16(ad_len, ad_data, uuid16)) return true;
     if (ad_data == NULL) return false;
 
     uint16_t offset = 0u;
@@ -145,6 +133,29 @@ static inline bool pico07_ad_data_contains_hid_compatible(
         offset = next;
     }
     return false;
+}
+
+static inline bool pico07_ad_data_contains_hid_compatible(
+    uint8_t ad_len,
+    const uint8_t *ad_data,
+    uint16_t uuid16)
+{
+    if (uuid16 != ORG_BLUETOOTH_SERVICE_HUMAN_INTERFACE_DEVICE) {
+        return ad_data_contains_uuid16(ad_len, ad_data, uuid16);
+    }
+
+    // First decide whether this is actually HID-like. The TLV lookup below is
+    // deliberately kept off the hot path for unrelated BLE advertisements.
+    const bool hid_like = ad_data_contains_uuid16(ad_len, ad_data, uuid16) ||
+                          pico07_ad_has_hid_appearance(ad_len, ad_data);
+    if (!hid_like) return false;
+
+    // During Pair Mouse/Keyboard/Composite, do not immediately reconnect the
+    // preferred mouse that was just disconnected to free the single HIDS slot.
+    // Targeted preferred-device recovery uses g_reconnect_scan_only and is not
+    // filtered here.
+    if (pico07_adv_is_preferred_peer()) return false;
+    return true;
 }
 
 static inline void pico07_hids_client_init_expanded(
