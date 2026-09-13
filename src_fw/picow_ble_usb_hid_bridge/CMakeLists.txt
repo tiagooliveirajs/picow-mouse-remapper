@@ -6,10 +6,6 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Initialise pico_sdk from installed location
-# (note this can come from environment, CMake cache etc)
-
-# == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
 if(WIN32)
     set(USERHOME $ENV{USERPROFILE})
 else()
@@ -22,24 +18,20 @@ set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
 if (EXISTS ${picoVscode})
     include(${picoVscode})
 endif()
-# ====================================================================================
 set(PICO_BOARD pico2_w CACHE STRING "Board type")
 
-# Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
 
 project(picow_ble_usb_hid_bridge C CXX ASM)
 
-# Initialise the Raspberry Pi SDK
 pico_sdk_init()
 
 add_compile_options(-Wall
-        -Wno-format          # int != int32_t as far as the compiler is concerned because gcc has int32_t as long int
-        -Wno-unused-function # we have some for the docs that aren't called
+        -Wno-format
+        -Wno-unused-function
         -Wno-maybe-uninitialized
         )
 
-# Add executable.
 add_executable(picow_ble_usb_hid_bridge
     main.c
     usb_descriptors.c
@@ -47,6 +39,8 @@ add_executable(picow_ble_usb_hid_bridge
     picow_bt_example_common.c
     Common.c
     canonical_hid.c
+    device_profile.c
+    remote_hid_queue.c
     pico_hat_ui.c
     pico_hat_diag.c
     )
@@ -68,18 +62,13 @@ target_include_directories(picow_ble_usb_hid_bridge PRIVATE
     )
 target_compile_definitions(picow_ble_usb_hid_bridge PRIVATE
     CYW43_LWIP=0
-    # RP2350 reserves 4 KiB of SCRATCH_X for the default core1 stack.
-    # Keep the POC within that linker region; if profiling later proves this
-    # insufficient, move core1 to an explicit stack in main SRAM instead.
     PICO_CORE1_STACK_SIZE=0x1000
     )
 pico_btstack_make_gatt_header(picow_ble_usb_hid_bridge PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/hog_host_demo.gatt
     )
 
-# disable usb output, enable uart output
 pico_enable_stdio_usb(picow_ble_usb_hid_bridge 0)
 pico_enable_stdio_uart(picow_ble_usb_hid_bridge 1)
 
-# create map/bin/hex/uf2 file etc.
 pico_add_extra_outputs(picow_ble_usb_hid_bridge)
