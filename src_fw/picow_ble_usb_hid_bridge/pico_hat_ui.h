@@ -35,6 +35,10 @@ bool pico_hat_ui_poll_event(pico_hat_event_t *event);
 // Screen lock is volatile by design and resets to false on every boot.
 bool pico_hat_ui_is_screen_locked(void);
 
+// True after panel init and the PICO-03 startup test pattern are complete. Later
+// gate/product renderers may safely own the framebuffer only after this point.
+bool pico_hat_ui_is_lcd_ready(void);
+
 // Human-readable names intended for UART validation logs.
 const char *pico_hat_ui_input_name(pico_hat_input_t input);
 
