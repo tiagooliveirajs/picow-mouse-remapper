@@ -35,6 +35,7 @@ add_compile_options(-Wall
 add_executable(picow_ble_usb_hid_bridge
     main.c
     usb_descriptors.c
+    boot_debug.c
     hog_host_demo_poc.c
     picow_bt_example_common.c
     Common.c
@@ -87,6 +88,7 @@ pico_btstack_make_gatt_header(picow_ble_usb_hid_bridge PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/hog_host_demo.gatt
     )
 
+# CDC is implemented by the custom TinyUSB descriptor in this debug branch.
 pico_enable_stdio_usb(picow_ble_usb_hid_bridge 0)
 pico_enable_stdio_uart(picow_ble_usb_hid_bridge 1)
 
