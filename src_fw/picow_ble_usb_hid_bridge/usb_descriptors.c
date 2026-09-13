@@ -1,9 +1,8 @@
 /*
- * Stable PICO-04 USB HID identity.
+ * Temporary diagnostic USB identity: stable HID + CDC ACM boot log.
  *
- * The USB host always sees the same firmware-owned Mouse + Keyboard report
- * descriptor, regardless of BLE pairing state or the remote device's Report
- * Map. Remote HID layouts are translated by canonical_hid.c.
+ * This file exists only on debug/pico08-usb-cdc-bootlog. The production branch
+ * keeps the PICO-04 HID-only descriptor and PID 0x4004.
  */
 
 #include <string.h>
@@ -13,24 +12,20 @@
 #include "usb_descriptors.h"
 
 #define USB_VID 0xCAFE
-#define USB_PID 0x4004
+#define USB_PID 0x40D0
 #define USB_BCD 0x0200
-
-//--------------------------------------------------------------------+
-// Device descriptor
-//--------------------------------------------------------------------+
 
 tusb_desc_device_t const desc_device = {
     .bLength            = sizeof(tusb_desc_device_t),
     .bDescriptorType    = TUSB_DESC_DEVICE,
     .bcdUSB             = USB_BCD,
-    .bDeviceClass       = 0x00,
-    .bDeviceSubClass    = 0x00,
-    .bDeviceProtocol    = 0x00,
+    .bDeviceClass       = 0xEF, // Miscellaneous / IAD composite
+    .bDeviceSubClass    = 0x02,
+    .bDeviceProtocol    = 0x01,
     .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor           = USB_VID,
     .idProduct          = USB_PID,
-    .bcdDevice          = 0x0200,
+    .bcdDevice          = 0x0201,
     .iManufacturer      = 0x01,
     .iProduct           = 0x02,
     .iSerialNumber      = 0x03,
@@ -42,32 +37,15 @@ uint8_t const *tud_descriptor_device_cb(void)
     return (uint8_t const *)&desc_device;
 }
 
-//--------------------------------------------------------------------+
-// HID report descriptor
-//--------------------------------------------------------------------+
-
-// Mouse report payload owned by this firmware:
-//   byte 0      buttons 1..5 + 3 padding bits
-//   bytes 1..2  X, signed relative 16-bit
-//   bytes 3..4  Y, signed relative 16-bit
-//   byte 5      vertical wheel, signed relative 8-bit
-//   byte 6      horizontal pan (AC Pan), signed relative 8-bit
-//
-// Keyboard uses the ordinary 8-byte boot-style payload under Report ID 1.
 uint8_t const desc_hid_report[] = {
     TUD_HID_REPORT_DESC_KEYBOARD(HID_REPORT_ID(REPORT_ID_KEYBOARD)),
 
-    // Usage Page (Generic Desktop), Usage (Mouse), Collection (Application)
     0x05, 0x01,
     0x09, 0x02,
     0xA1, 0x01,
     0x85, REPORT_ID_MOUSE,
-
-    // Usage (Pointer), Collection (Physical)
     0x09, 0x01,
     0xA1, 0x00,
-
-    // Five independent buttons.
     0x05, 0x09,
     0x19, 0x01,
     0x29, 0x05,
@@ -76,31 +54,23 @@ uint8_t const desc_hid_report[] = {
     0x95, 0x05,
     0x75, 0x01,
     0x81, 0x02,
-
-    // Three padding bits.
     0x95, 0x01,
     0x75, 0x03,
     0x81, 0x03,
-
-    // X/Y: signed 16-bit relative values.
     0x05, 0x01,
     0x09, 0x30,
     0x09, 0x31,
-    0x16, 0x01, 0x80, // Logical Minimum -32767
-    0x26, 0xFF, 0x7F, // Logical Maximum  32767
+    0x16, 0x01, 0x80,
+    0x26, 0xFF, 0x7F,
     0x75, 0x10,
     0x95, 0x02,
     0x81, 0x06,
-
-    // Vertical wheel: signed 8-bit relative.
     0x09, 0x38,
     0x15, 0x81,
     0x25, 0x7F,
     0x75, 0x08,
     0x95, 0x01,
     0x81, 0x06,
-
-    // Horizontal pan: Consumer Page / AC Pan, signed 8-bit relative.
     0x05, 0x0C,
     0x0A, 0x38, 0x02,
     0x15, 0x81,
@@ -108,9 +78,8 @@ uint8_t const desc_hid_report[] = {
     0x75, 0x08,
     0x95, 0x01,
     0x81, 0x06,
-
-    0xC0, // End Physical Collection
-    0xC0, // End Application Collection
+    0xC0,
+    0xC0,
 };
 
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance)
@@ -119,17 +88,18 @@ uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance)
     return desc_hid_report;
 }
 
-//--------------------------------------------------------------------+
-// Configuration descriptor
-//--------------------------------------------------------------------+
-
 enum {
+    ITF_NUM_CDC,
+    ITF_NUM_CDC_DATA,
     ITF_NUM_HID,
     ITF_NUM_TOTAL,
 };
 
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN)
-#define EPNUM_HID 0x81
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_HID_DESC_LEN)
+#define EPNUM_HID       0x81
+#define EPNUM_CDC_NOTIF 0x82
+#define EPNUM_CDC_OUT   0x03
+#define EPNUM_CDC_IN    0x83
 
 uint8_t const desc_configuration[] = {
     TUD_CONFIG_DESCRIPTOR(1,
@@ -138,6 +108,14 @@ uint8_t const desc_configuration[] = {
                           CONFIG_TOTAL_LEN,
                           TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP,
                           250),
+
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC,
+                       0,
+                       EPNUM_CDC_NOTIF,
+                       8,
+                       EPNUM_CDC_OUT,
+                       EPNUM_CDC_IN,
+                       64),
 
     TUD_HID_DESCRIPTOR(ITF_NUM_HID,
                        0,
@@ -154,10 +132,6 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
     return desc_configuration;
 }
 
-//--------------------------------------------------------------------+
-// String descriptors
-//--------------------------------------------------------------------+
-
 enum {
     STRID_LANGID = 0,
     STRID_MANUFACTURER,
@@ -168,7 +142,7 @@ enum {
 static char const *string_desc_arr[] = {
     (const char[]){0x09, 0x04},
     "Remapper",
-    "Pico BLE HID Remapper",
+    "Pico Remapper DEBUG CDC",
     NULL,
 };
 
@@ -190,19 +164,13 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
             break;
 
         default: {
-            if (index >= (sizeof(string_desc_arr) / sizeof(string_desc_arr[0]))) {
-                return NULL;
-            }
+            if (index >= (sizeof(string_desc_arr) / sizeof(string_desc_arr[0]))) return NULL;
             const char *str = string_desc_arr[index];
-            if (str == NULL) {
-                return NULL;
-            }
+            if (str == NULL) return NULL;
             chr_count = strlen(str);
             const size_t max_count = (sizeof(_desc_str) / sizeof(_desc_str[0])) - 1;
             if (chr_count > max_count) chr_count = max_count;
-            for (size_t i = 0; i < chr_count; ++i) {
-                _desc_str[1 + i] = (uint16_t)str[i];
-            }
+            for (size_t i = 0; i < chr_count; ++i) _desc_str[1 + i] = (uint16_t)str[i];
             break;
         }
     }
