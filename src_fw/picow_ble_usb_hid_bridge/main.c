@@ -7,6 +7,7 @@
 #include "tusb.h"
 
 #include "Common.h"
+#include "boot_debug.h"
 #include "canonical_hid.h"
 #include "classic_keyboard.h"
 #include "device_profile.h"
@@ -23,18 +24,15 @@
 #define PICO06_CANON_OUTPUTS 2u
 #define PICO08_CORE1_STACK_SIZE_BYTES (8u * 1024u)
 #define PICO08_BT_START_DELAY_MS 500u
+#define DEBUG_LCD_PROBE_INTERVAL_MS 50u
 
-// BLE HOGP + Bluetooth Classic HID share Core1. The default RP2350 Core1 stack
-// region used by multicore_launch_core1() cannot safely be enlarged to 8 KiB
-// without colliding with the linker-owned Core0 stack. Allocate the intended
-// 8 KiB stack explicitly in normal SRAM and launch Core1 with it instead.
 static uint32_t g_pico08_core1_stack[PICO08_CORE1_STACK_SIZE_BYTES / sizeof(uint32_t)]
     __attribute__((aligned(16)));
 static bool g_bluetooth_core_started;
 static uint32_t g_lcd_ready_since_ms;
+static uint32_t g_last_lcd_probe_ms;
+static bool g_lcd_ready_logged;
 
-// Upstream HOGP still raises the legacy request. USB identity is stable from
-// PICO-04 onward, so PICO-08 consumes it without re-enumerating the host.
 volatile bool g_usb_reinit_request = false;
 
 void usb_dev_main(void);
@@ -51,10 +49,6 @@ static void maybe_start_bluetooth_core(void)
 {
     if (g_bluetooth_core_started) return;
 
-    // The LCD initialization/render path is cooperative. Let Core0 complete the
-    // first visible UI before starting the much heavier dual Bluetooth stack.
-    // This also makes a future Core1 fault diagnosable instead of presenting as
-    // a board that never started its screen.
     if (!pico_hat_ui_is_lcd_ready()) {
         g_lcd_ready_since_ms = 0u;
         return;
@@ -63,16 +57,21 @@ static void maybe_start_bluetooth_core(void)
     const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
     if (g_lcd_ready_since_ms == 0u) {
         g_lcd_ready_since_ms = now_ms;
+        boot_debug_logf("BT gate: LCD reports ready; holding 500 ms before Core1 launch");
         return;
     }
     if ((uint32_t)(now_ms - g_lcd_ready_since_ms) < PICO08_BT_START_DELAY_MS) return;
 
+    boot_debug_logf("BOOT 20 launching BLE+Classic Core1 with %u-byte dedicated stack",
+                    (unsigned)sizeof(g_pico08_core1_stack));
+    boot_debug_task();
     printf("[PICO-08] starting BLE+Classic Core1 with %u-byte dedicated stack\r\n",
            (unsigned)sizeof(g_pico08_core1_stack));
     g_bluetooth_core_started = true;
     multicore_launch_core1_with_stack(ble_host_main,
                                       g_pico08_core1_stack,
                                       sizeof(g_pico08_core1_stack));
+    boot_debug_logf("BOOT 21 Core1 launch call returned on Core0");
 }
 
 int main(void)
@@ -81,25 +80,62 @@ int main(void)
     tud_init(BOARD_TUD_RHPORT);
     if (board_init_after_tusb) board_init_after_tusb();
 
+    boot_debug_init();
+    boot_debug_logf("BOOT 00 board_init + TinyUSB initialized");
+    boot_debug_logf("DEBUG BUILD: PID 0x40D0 CDC+HID; firmware waits for CDC terminal");
+    boot_debug_wait_for_terminal();
+
+    boot_debug_logf("BOOT 01 stdio_init_all begin");
     stdio_init_all();
-    CMN_Init(); // legacy helper storage; active transports use dedicated queues
+    boot_debug_logf("BOOT 02 stdio_init_all complete");
+
+    boot_debug_logf("BOOT 03 CMN_Init begin");
+    CMN_Init();
+    boot_debug_logf("BOOT 04 CMN_Init complete");
+
+    boot_debug_logf("BOOT 05 canonical_hid_init begin");
     canonical_hid_init();
+    boot_debug_logf("BOOT 06 canonical_hid_init complete");
+
+    boot_debug_logf("BOOT 07 remote_hid_queue_init begin");
     remote_hid_queue_init();
+    boot_debug_logf("BOOT 08 remote_hid_queue_init complete");
+
+    boot_debug_logf("BOOT 09 keyboard_hid_queue_init begin");
     keyboard_hid_queue_init();
+    boot_debug_logf("BOOT 10 keyboard_hid_queue_init complete");
+
+    boot_debug_logf("BOOT 11 classic_keyboard_shared_init begin");
     classic_keyboard_shared_init();
+    boot_debug_logf("BOOT 12 classic_keyboard_shared_init complete");
+
+    boot_debug_logf("BOOT 13 persistent profile init begin");
     device_profile_init();
     remap_profile_init();
+    boot_debug_logf("BOOT 14 persistent profile init complete");
+
+    boot_debug_logf("BOOT 15 remap/HID++ init begin");
     logitech_hidpp_init();
     remap_engine_init();
+    boot_debug_logf("BOOT 16 remap/HID++ init complete");
 
+    boot_debug_logf("BOOT 17 pico_hat_ui_init begin");
     pico_hat_ui_init();
-    pico06_ui_init();
+    boot_debug_logf("BOOT 18 pico_hat_ui_init complete");
 
-    // BTstack/TLV flash work is kept on Core1; protect Core0 while flash writes.
+    boot_debug_logf("BOOT 19 pico06_ui_init begin");
+    pico06_ui_init();
+    boot_debug_logf("BOOT 19A pico06_ui_init complete");
+
     flash_safe_execute_core_init();
+    boot_debug_logf("BOOT 19B flash_safe_execute_core_init complete");
     g_bluetooth_core_started = false;
     g_lcd_ready_since_ms = 0u;
+    g_last_lcd_probe_ms = 0u;
+    g_lcd_ready_logged = false;
 
+    boot_debug_logf("BOOT 19C entering Core0 service loop");
+    boot_debug_task();
     usb_dev_main();
     return 0;
 }
@@ -109,15 +145,40 @@ void usb_dev_main(void)
     while (1) {
         if (g_usb_reinit_request) {
             g_usb_reinit_request = false;
+            boot_debug_logf("legacy USB re-enumeration request ignored");
             printf("[PICO-08] ignored legacy USB re-enumeration request\r\n");
         }
 
         tud_task();
+        boot_debug_task();
         hid_task();
+
+        const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+        const bool was_ready = pico_hat_ui_is_lcd_ready();
+        bool probe_this_call = false;
+        if (!was_ready &&
+            (uint32_t)(now_ms - g_last_lcd_probe_ms) >= DEBUG_LCD_PROBE_INTERVAL_MS) {
+            g_last_lcd_probe_ms = now_ms;
+            probe_this_call = true;
+            boot_debug_logf("LCD probe: before pico_hat_ui_task, ready=0");
+            boot_debug_task();
+        }
+
         pico_hat_ui_task();
+
+        if (probe_this_call) {
+            boot_debug_logf("LCD probe: after pico_hat_ui_task, ready=%u",
+                            pico_hat_ui_is_lcd_ready() ? 1u : 0u);
+        }
+        if (!g_lcd_ready_logged && pico_hat_ui_is_lcd_ready()) {
+            g_lcd_ready_logged = true;
+            boot_debug_logf("LCD READY: init plus 240-row cooperative test pattern completed");
+        }
+
         pico06_ui_task();
         maybe_start_bluetooth_core();
         led_blinking_task();
+        boot_debug_task();
     }
 }
 
@@ -150,13 +211,11 @@ bool send_hid_report(void)
         remote_hid_queue_clear();
         canonical_hid_reset_device();
         remap_engine_reset_device();
+        boot_debug_logf("BLE mouse disconnect -> neutral mouse outputs");
         printf("[PICO-08] BLE mouse disconnect -> neutral mouse outputs\r\n");
     }
     previous_ble_ready = ble_ready;
 
-    // Keyboard transport is independent from the BLE mouse/remap pipeline.
-    // Its reports are already normalized to the firmware-owned USB Keyboard
-    // Report ID 1, so they bypass canonical mouse processing completely.
     if (keyboard_hid_queue_peek(&keyboard_report)) {
         if (tud_suspended()) {
             tud_remote_wakeup();
