@@ -28,15 +28,16 @@
 
 #include "Common.h"
 #include "canonical_hid.h"
-#include "pico_hat_diag.h"
+#include "device_profile.h"
+#include "pico05_status.h"
 #include "pico_hat_ui.h"
+#include "remote_hid_queue.h"
 
 #define LED_BLINKING_INTERVAL 200 // ms
-#define PICO04_PENDING_OUTPUTS 2u
+#define PICO05_PENDING_OUTPUTS 2u
 
-// Kept only because the PICO-01 BLE host still writes this legacy flag when it
-// reaches READY. PICO-04 deliberately consumes/ignores it: the firmware-owned
-// USB descriptor is stable and must not disconnect/re-enumerate on BLE changes.
+// Kept because the upstream-derived HOGP source still raises the legacy flag.
+// USB identity is stable from PICO-04 onward, so the request is only consumed.
 volatile bool g_usb_reinit_request = false;
 
 void usb_dev_main(void);
@@ -62,12 +63,15 @@ int main(void)
     }
 
     stdio_init_all();
-    CMN_Init();
+    CMN_Init(); // retained for legacy helpers; active HOGP traffic uses remote_hid_queue
     canonical_hid_init();
+    remote_hid_queue_init();
+    device_profile_init();
 
     // PICO-03 validated HAT baseline. LCD/input remains cooperative so USB HID
     // is serviced before local UI work in every Core0 pass.
     pico_hat_ui_init();
+    pico05_status_init();
 
     // Lock out Core0 when BTstack performs flash writes on Core1.
     flash_safe_execute_core_init();
@@ -83,23 +87,22 @@ int main(void)
 void usb_dev_main(void)
 {
     while (1) {
-        // PICO-04: connecting a BLE device must never change USB identity.
-        // Consume the old POC request without disconnecting TinyUSB.
         if (g_usb_reinit_request) {
             g_usb_reinit_request = false;
-            printf("[PICO-04] ignored legacy USB re-enumeration request\r\n");
+            printf("[PICO-05] ignored legacy USB re-enumeration request\r\n");
         }
 
         tud_task();
         hid_task();
         pico_hat_ui_task();
+        pico05_status_task();
         pico_hat_event_log_task();
         led_blinking_task();
     }
 }
 
 //--------------------------------------------------------------------+
-// Local gate diagnostics
+// Local input logging
 //--------------------------------------------------------------------+
 void pico_hat_event_log_task(void)
 {
@@ -108,12 +111,11 @@ void pico_hat_event_log_task(void)
         return;
     }
 
-    pico_hat_diag_handle_event(&event);
-
-    // PICO-04 must not assign remap semantics to HAT controls. Escape is a
-    // product mapping owned exclusively by DEFAULT_REMAP and is introduced by
-    // the profile/remap engine in PICO-06.
-    printf("[PICO-04] %s %s lock=%u\r\n",
+    // PICO-05 does not assign profile/remap semantics to HAT buttons. The old
+    // PICO-03 colored marker renderer is deliberately not called here because
+    // the gate screen now owns the framebuffer using the black/white product
+    // accessibility baseline. KEY4 screen lock remains implemented in ui.c.
+    printf("[PICO-05] %s %s lock=%u\r\n",
            pico_hat_ui_input_name(event.input),
            event.pressed ? "DOWN" : "UP",
            pico_hat_ui_is_screen_locked() ? 1u : 0u);
@@ -143,14 +145,13 @@ void tud_resume_cb(void)
 // USB HID
 //--------------------------------------------------------------------+
 
-// Convert the PICO-01 remote-layout queue into fixed PICO-04 USB reports and
-// send at most one USB report per call. The stable descriptor already exposes
-// Keyboard + Mouse from boot, but PICO-04 itself only emits passthrough mouse
-// traffic; keyboard output is owned by the Default Remap engine in PICO-06.
+// PICO-05 consumes RAW normalized HOGP reports directly. This intentionally
+// bypasses Common.c's historical PICO-01 Forward->Left transform, so a newly
+// paired/restored PASSTHROUGH profile cannot inherit an implicit remap.
 bool send_hid_report(void)
 {
     static ST_HID_RPT remote_report;
-    static ST_HID_RPT pending[PICO04_PENDING_OUTPUTS];
+    static ST_HID_RPT pending[PICO05_PENDING_OUTPUTS];
     static uint8_t pending_count = 0;
     static uint8_t pending_index = 0;
     static bool readiness_initialized = false;
@@ -167,29 +168,29 @@ bool send_hid_report(void)
     if (previous_ble_ready && !ble_ready) {
         pending_index = 0;
         pending_count = (uint8_t)canonical_hid_neutralize(pending,
-                                                           PICO04_PENDING_OUTPUTS);
-        CMN_ClearQueue(CMN_QUE_KIND_HID_RPT);
+                                                           PICO05_PENDING_OUTPUTS);
+        remote_hid_queue_clear();
         canonical_hid_reset_device();
-        printf("[PICO-04] BLE disconnect -> neutral USB outputs\r\n");
+        printf("[PICO-05] BLE disconnect -> neutral USB outputs\r\n");
     }
     previous_ble_ready = ble_ready;
 
-    // If no canonical output is pending, translate one queued remote report.
+    // If no canonical output is pending, translate one queued raw remote report.
     if (pending_index >= pending_count) {
         pending_index = 0;
         pending_count = 0;
 
-        if (CMN_PeekQueue(CMN_QUE_KIND_HID_RPT, &remote_report)) {
+        if (remote_hid_queue_peek(&remote_report)) {
             pending_count = (uint8_t)canonical_hid_process_remote_report(
                 &remote_report,
                 get_ble_hid_report_descriptor_data(),
                 get_ble_hid_report_descriptor_len(),
                 pending,
-                PICO04_PENDING_OUTPUTS);
+                PICO05_PENDING_OUTPUTS);
 
-            // The remote report has been fully copied/consumed by the canonical
-            // adapter regardless of whether it produced a USB report.
-            CMN_AdvanceQueue(CMN_QUE_KIND_HID_RPT);
+            // The raw remote report has been fully copied/consumed by the
+            // canonical adapter whether or not it produced a USB report.
+            remote_hid_queue_advance();
         }
     }
 
