@@ -103,19 +103,43 @@ static void draw_marker(uint16_t x0, uint16_t y0, bool active)
     lcd_select(false);
 }
 
+static void clear_all_markers(void)
+{
+    // KEY4 may lock the screen while one or several controls are still held.
+    // Their release transitions are intentionally suppressed by the lock, so
+    // any marker already drawn must be cleared explicitly. Otherwise stale
+    // magenta squares would survive unlock until each source is pressed again.
+    for (pico_hat_input_t input = PICO_HAT_INPUT_JOY_UP;
+         input < PICO_HAT_INPUT_KEY4;
+         input = (pico_hat_input_t)(input + 1)) {
+        const diag_pos_t pos = g_diag_positions[input];
+        draw_marker(pos.x, pos.y, false);
+    }
+}
+
 void pico_hat_diag_handle_event(const pico_hat_event_t *event)
 {
     if (event == NULL || event->input >= PICO_HAT_INPUT_COUNT) {
         return;
     }
 
-    // KEY4 owns the screen lock/backlight path; drawing while it is toggling is
-    // intentionally avoided. Also ignore very early events before LCD init has
-    // had enough time to complete.
-    if (event->input == PICO_HAT_INPUT_KEY4 || to_ms_since_boot(get_absolute_time()) < 1000u) {
+    // Ignore very early events before LCD init has had enough time to complete.
+    if (to_ms_since_boot(get_absolute_time()) < 1000u) {
         return;
     }
 
-    const diag_pos_t pos = g_diag_positions[event->input];
-    draw_marker(pos.x, pos.y, event->pressed);
+    if (event->input == PICO_HAT_INPUT_KEY4) {
+        // Clear the complete transient diagnostic layer on every KEY4 press.
+        // This is deliberately independent from lock/unlock direction: lock
+        // suppresses subsequent non-KEY4 transitions, while unlock must always
+        // start from a clean visual baseline. KEY4 release does no drawing.
+        if (event->pressed) {
+            clear_all_markers();
+        }
+        return;
+    }
+
+    draw_marker(g_diag_positions[event->input].x,
+                g_diag_positions[event->input].y,
+                event->pressed);
 }
