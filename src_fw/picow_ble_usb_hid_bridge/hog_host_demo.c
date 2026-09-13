@@ -83,6 +83,12 @@ static btstack_packet_callback_registration_t sm_event_callback_registration;
 static const btstack_tlv_t * btstack_tlv_singleton_impl;
 static void * btstack_tlv_singleton_context;
 
+// Recovery scans are never general Pair New Device scans. They accept only the
+// exact preferred peer address that just failed a direct connection, preventing
+// the old fallback from bonding an unrelated HID that happens to advertise.
+static bool g_reconnect_scan_only;
+static le_device_addr_t g_reconnect_target;
+
 extern volatile bool g_usb_reinit_request;
 
 void ble_host_main(void);
@@ -110,6 +116,12 @@ static void pair_publish_state(pico07_pair_state_t state, const char *message);
 static void hog_start_scan(void);
 static void hog_start_connect(void);
 
+static bool same_le_device(const le_device_addr_t *a, const le_device_addr_t *b)
+{
+    return a != NULL && b != NULL && a->addr_type == b->addr_type &&
+           memcmp(a->addr, b->addr, sizeof(a->addr)) == 0;
+}
+
 static void hid_handle_input_report(uint8_t service_index, uint8_t report_id,
                                     const uint8_t * report, uint16_t report_len){
     (void)service_index;
@@ -133,6 +145,16 @@ static bool adv_event_contains_hid_service(const uint8_t * packet){
 static void hog_scan_timeout(btstack_timer_source_t * ts){
     UNUSED(ts);
     if (app_state != W4_HID_DEVICE_FOUND) return;
+
+    if (g_reconnect_scan_only) {
+        gap_stop_scan();
+        g_reconnect_scan_only = false;
+        app_state = W4_WORKING;
+        printf("Preferred-device recovery scan timed out.\n");
+        pair_publish_state(PICO07_PAIR_ERROR, "DEVICE UNAVAILABLE");
+        return;
+    }
+
     if (pico07_pairing_scan_timeout_owned()) return;
     printf("Scan timeout. Switching to bonded connection attempt...\n");
     gap_stop_scan();
@@ -150,16 +172,30 @@ static void hog_start_scan(void){
     gap_start_scan();
 }
 
+static void start_preferred_recovery_scan(void)
+{
+    g_reconnect_target = remote_device;
+    g_reconnect_scan_only = true;
+    pair_publish_state(PICO07_PAIR_CONNECTING, "RETRYING SAVED MOUSE");
+    hog_start_scan();
+}
+
 static void hog_connection_timeout(btstack_timer_source_t * ts){
     UNUSED(ts);
     printf("Connection timeout.\n");
     const bool managed = pico07_pairing_connection_is_managed();
     gap_connect_cancel();
 
-    // Only UI-owned attempts are terminal PICO-07 errors. Normal preferred
-    // reconnects retain the proven PICO-06 fallback: scan and reconnect a HID
-    // instead of getting stuck in DEVICE UNAVAILABLE after a short wake delay.
-    if (managed && pico07_pairing_connection_timeout_owned()) return;
+    // UI-owned attempts retain explicit error semantics. A normal preferred
+    // reconnect gets one targeted scan for that exact saved address so a mouse
+    // that was merely late to wake can recover without accepting another HID.
+    if (managed) {
+        if (pico07_pairing_connection_timeout_owned()) return;
+    } else {
+        start_preferred_recovery_scan();
+        return;
+    }
+
     hog_start_scan();
 }
 
@@ -195,12 +231,22 @@ static void hog_start_connect(void){
 static void handle_outgoing_connection_error(void){
     printf("Outgoing connection/pairing error\n");
     const bool managed = pico07_pairing_connection_is_managed();
-    if (connection_handle != HCI_CON_HANDLE_INVALID) gap_disconnect(connection_handle);
 
-    // Keep PICO-07 errors local to explicit UI attempts. A normal reconnect
-    // falls back to the PICO-06 scan loop rather than becoming permanently
-    // unavailable after a transient HIDS/security failure.
-    if (managed && pico07_pairing_handle_connection_error()) return;
+    if (managed) {
+        if (connection_handle != HCI_CON_HANDLE_INVALID) gap_disconnect(connection_handle);
+        if (pico07_pairing_handle_connection_error()) return;
+        hog_start_scan();
+        return;
+    }
+
+    // Preserve the preferred target before disconnecting; the disconnect event
+    // will start the targeted recovery scan. If no ACL exists, start it now.
+    g_reconnect_target = remote_device;
+    g_reconnect_scan_only = true;
+    if (connection_handle != HCI_CON_HANDLE_INVALID) {
+        gap_disconnect(connection_handle);
+        return;
+    }
     hog_start_scan();
 }
 
@@ -220,6 +266,7 @@ static void handle_gatt_client_event(uint8_t packet_type, uint16_t channel,
                 case ERROR_CODE_SUCCESS:
                     printf("HID service client connected, found %d services\n",
                         gattservice_subevent_hid_service_connected_get_num_instances(packet));
+                    g_reconnect_scan_only = false;
 
                     // Legacy reconnects keep the preferred peer tag. A PICO-07
                     // user-selected peer is only promoted to preferred after its
@@ -275,11 +322,30 @@ static void packet_handler (uint8_t packet_type, uint16_t channel,
                     hog_start_connect();
                     break;
 
-                case GAP_EVENT_ADVERTISING_REPORT:
+                case GAP_EVENT_ADVERTISING_REPORT: {
                     if (app_state != W4_HID_DEVICE_FOUND) break;
                     if (!adv_event_contains_hid_service(packet)) break;
+
+                    if (g_reconnect_scan_only) {
+                        le_device_addr_t advertised;
+                        gap_event_advertising_report_get_address(packet, advertised.addr);
+                        advertised.addr_type =
+                            gap_event_advertising_report_get_address_type(packet);
+                        if (!same_le_device(&advertised, &g_reconnect_target)) break;
+
+                        printf("Preferred HID found during recovery scan.\n");
+                        g_reconnect_scan_only = false;
+                        btstack_run_loop_remove_timer(&connection_timer);
+                        gap_stop_scan();
+                        remote_device = advertised;
+                        hog_connect();
+                        break;
+                    }
+
                     if (pico07_pairing_consume_advertisement(packet)) break;
 
+                    // This legacy branch is reachable only for transport-owned
+                    // scans. Pair New Device advertisements are consumed above.
                     btstack_run_loop_remove_timer(&connection_timer);
                     gap_stop_scan();
                     gap_event_advertising_report_get_address(packet, remote_device.addr);
@@ -287,6 +353,7 @@ static void packet_handler (uint8_t packet_type, uint16_t channel,
                     printf("Found HID device, connecting...\n");
                     hog_connect();
                     break;
+                }
 
                 case HCI_EVENT_DISCONNECTION_COMPLETE:
                     connection_handle = HCI_CON_HANDLE_INVALID;
@@ -294,6 +361,10 @@ static void packet_handler (uint8_t packet_type, uint16_t channel,
                     btstack_run_loop_remove_timer(&connection_timer);
                     app_state = W4_WORKING;
                     if (pico07_pairing_handle_disconnect()) break;
+                    if (g_reconnect_scan_only) {
+                        hog_start_scan();
+                        break;
+                    }
                     hog_start_connect();
                     break;
 
@@ -438,6 +509,7 @@ int btstack_main(int argc, const char * argv[]){
     sm_add_event_handler(&sm_event_callback_registration);
 
     setvbuf(stdin, NULL, _IONBF, 0);
+    g_reconnect_scan_only = false;
     app_state = W4_WORKING;
     hci_power_control(HCI_POWER_ON);
     return 0;
