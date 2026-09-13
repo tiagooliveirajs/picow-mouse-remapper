@@ -54,6 +54,13 @@ add_executable(picow_ble_usb_hid_bridge
 set_source_files_properties(device_profile.c PROPERTIES
     COMPILE_OPTIONS "-include;btstack.h;-include;pico/critical_section.h")
 
+# PICO-07 keyboard-pairing validation: keep discovery open for 50 seconds
+# instead of the transport demo's 5-second scan window. The override is scoped
+# to the HOGP wrapper translation unit and leaves the 8-second connect timeout
+# untouched.
+set_source_files_properties(hog_host_demo_poc.c PROPERTIES
+    COMPILE_OPTIONS "-include;${CMAKE_CURRENT_LIST_DIR}/pico07_scan_timeout_override.h")
+
 target_link_libraries(picow_ble_usb_hid_bridge
     pico_stdlib
     pico_multicore
