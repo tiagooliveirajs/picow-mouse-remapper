@@ -79,9 +79,9 @@ target_include_directories(picow_ble_usb_hid_bridge PRIVATE
     )
 target_compile_definitions(picow_ble_usb_hid_bridge PRIVATE
     CYW43_LWIP=0
-    # RP2350 reserves a fixed scratch region for Core1. Keep the proven 4 KiB
-    # stack size; enlarging it to 8 KiB overlaps the Core0 stack at link time.
-    PICO_CORE1_STACK_SIZE=0x1000
+    # Core1 uses multicore_launch_core1_with_stack() with an explicit 8 KiB
+    # SRAM buffer. Do not reserve the default linker-owned stack1 region.
+    PICO_CORE1_STACK_SIZE=0
     )
 pico_btstack_make_gatt_header(picow_ble_usb_hid_bridge PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/hog_host_demo.gatt
