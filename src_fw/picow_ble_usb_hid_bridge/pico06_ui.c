@@ -296,14 +296,14 @@ static void build_lines(void)
             break;
 
         case SCREEN_MODE_MENU:
-            snprintf(g_lines[0], sizeof(g_lines[0]), "REMAP MODE");
-            snprintf(g_lines[1], sizeof(g_lines[1]), "%c PASSTHROUGH",
+            snprintf(g_lines[0], sizeof(g_lines[0]), "REMAP ACTION");
+            snprintf(g_lines[1], sizeof(g_lines[1]), "%c APPLY PASSTHROUGH",
                      g_mode_selection == 0 ? '>' : ' ');
-            snprintf(g_lines[2], sizeof(g_lines[2]), "%c DEFAULT REMAP",
+            snprintf(g_lines[2], sizeof(g_lines[2]), "%c APPLY DEFAULT",
                      g_mode_selection == 1 ? '>' : ' ');
-            snprintf(g_lines[3], sizeof(g_lines[3]), "%c CUSTOM REMAP",
+            snprintf(g_lines[3], sizeof(g_lines[3]), "%c EDIT CUSTOM",
                      g_mode_selection == 2 ? '>' : ' ');
-            snprintf(g_lines[5], sizeof(g_lines[5]), "JOY PRESS SELECT");
+            snprintf(g_lines[5], sizeof(g_lines[5]), "JOY PRESS CONFIRM");
             snprintf(g_lines[6], sizeof(g_lines[6]), "K1 CANCEL");
             snprintf(g_lines[7], sizeof(g_lines[7]), "K3 HELP");
             break;
