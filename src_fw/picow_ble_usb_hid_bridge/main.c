@@ -24,11 +24,14 @@
 #define PICO06_CANON_OUTPUTS 2u
 #define PICO08_CORE1_STACK_SIZE_BYTES (8u * 1024u)
 #define PICO08_BT_START_DELAY_MS 500u
+#define DEBUG_LCD_PROBE_INTERVAL_MS 50u
 
 static uint32_t g_pico08_core1_stack[PICO08_CORE1_STACK_SIZE_BYTES / sizeof(uint32_t)]
     __attribute__((aligned(16)));
 static bool g_bluetooth_core_started;
 static uint32_t g_lcd_ready_since_ms;
+static uint32_t g_last_lcd_probe_ms;
+static bool g_lcd_ready_logged;
 
 volatile bool g_usb_reinit_request = false;
 
@@ -128,6 +131,8 @@ int main(void)
     boot_debug_logf("BOOT 19B flash_safe_execute_core_init complete");
     g_bluetooth_core_started = false;
     g_lcd_ready_since_ms = 0u;
+    g_last_lcd_probe_ms = 0u;
+    g_lcd_ready_logged = false;
 
     boot_debug_logf("BOOT 19C entering Core0 service loop");
     boot_debug_task();
@@ -147,7 +152,29 @@ void usb_dev_main(void)
         tud_task();
         boot_debug_task();
         hid_task();
+
+        const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+        const bool was_ready = pico_hat_ui_is_lcd_ready();
+        bool probe_this_call = false;
+        if (!was_ready &&
+            (uint32_t)(now_ms - g_last_lcd_probe_ms) >= DEBUG_LCD_PROBE_INTERVAL_MS) {
+            g_last_lcd_probe_ms = now_ms;
+            probe_this_call = true;
+            boot_debug_logf("LCD probe: before pico_hat_ui_task, ready=0");
+            boot_debug_task();
+        }
+
         pico_hat_ui_task();
+
+        if (probe_this_call) {
+            boot_debug_logf("LCD probe: after pico_hat_ui_task, ready=%u",
+                            pico_hat_ui_is_lcd_ready() ? 1u : 0u);
+        }
+        if (!g_lcd_ready_logged && pico_hat_ui_is_lcd_ready()) {
+            g_lcd_ready_logged = true;
+            boot_debug_logf("LCD READY: init plus 240-row cooperative test pattern completed");
+        }
+
         pico06_ui_task();
         maybe_start_bluetooth_core();
         led_blinking_task();
