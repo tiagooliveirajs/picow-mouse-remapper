@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "btstack.h"
+#include "Common.h"
 
 #define TARGET_NAME "Bluetooth keyboard 3.0"
 #define TARGET_NAME_ALIAS "BKB-3G"
@@ -32,17 +33,19 @@ typedef enum {
     APP_CONNECTED,
 } app_state_t;
 
-static app_state_t app_state = APP_WAITING_FOR_BTSTACK;
+static volatile app_state_t app_state = APP_WAITING_FOR_BTSTACK;
 
 static discovered_device_t devices[MAX_DISCOVERED_DEVICES];
 static int device_count;
 
 static bd_addr_t target_addr;
-static uint16_t hid_host_cid;
-static bool hid_descriptor_available;
+static volatile uint16_t hid_host_cid;
+static volatile bool hid_descriptor_available;
 static uint8_t hid_descriptor_storage[HID_DESCRIPTOR_STORAGE_SIZE];
 
 static btstack_packet_callback_registration_t hci_event_callback_registration;
+
+extern volatile bool g_usb_reinit_request;
 
 static void start_inquiry(void);
 static void request_next_remote_name(void);
@@ -92,12 +95,16 @@ static void connect_target(const bd_addr_t address) {
     printf("Opening Classic HID connection to %s...\n", bd_addr_to_str(target_addr));
     printf("If a 6-digit passkey is printed below, type it on the keyboard and press Enter.\n");
 
-    uint8_t status = hid_host_connect(target_addr, HID_PROTOCOL_MODE_REPORT, &hid_host_cid);
+    uint16_t new_cid = 0;
+    uint8_t status = hid_host_connect(target_addr, HID_PROTOCOL_MODE_REPORT, &new_cid);
     if (status != ERROR_CODE_SUCCESS) {
         printf("hid_host_connect failed immediately, status 0x%02x\n", status);
         hid_host_cid = 0;
         start_inquiry();
+        return;
     }
+
+    hid_host_cid = new_cid;
 }
 
 static void request_next_remote_name(void) {
@@ -216,6 +223,32 @@ static void handle_remote_name_complete(uint8_t *packet) {
     request_next_remote_name();
 }
 
+static void enqueue_usb_hid_report(const uint8_t *report, uint16_t report_len) {
+    if (!hid_descriptor_available) {
+        return;
+    }
+
+    // Classic HID interrupt reports include the HID DATA header 0xA1.
+    // TinyUSB needs the HID report itself, beginning with the Report ID.
+    if (report_len < 2 || report[0] != 0xA1) {
+        return;
+    }
+
+    static ST_HID_RPT usb_report;
+    usb_report.report_id = report[1];
+    usb_report.report_len = report_len - 1;
+
+    if (usb_report.report_len > CMN_HID_RPT_DATA_SIZE) {
+        usb_report.report_len = CMN_HID_RPT_DATA_SIZE;
+    }
+
+    memcpy(usb_report.report, &report[1], usb_report.report_len);
+
+    if (!CMN_Enqueue(CMN_QUE_KIND_HID_RPT, &usb_report)) {
+        printf("USB HID queue full; dropping report ID 0x%02x.\n", usb_report.report_id);
+    }
+}
+
 static void handle_hid_report(uint8_t *packet) {
     const uint8_t *report = hid_subevent_report_get_report(packet);
     uint16_t report_len = hid_subevent_report_get_report_len(packet);
@@ -227,17 +260,20 @@ static void handle_hid_report(uint8_t *packet) {
         return;
     }
 
-    // Classic HID interrupt reports normally include the HID DATA header (0xA1).
-    // Strip it before feeding the descriptor-based parser.
+    // Forward the complete HID report to Core0/TinyUSB first.
+    enqueue_usb_hid_report(report, report_len);
+
+    // Also parse it for UART diagnostics.
     if (report_len < 2 || report[0] != 0xA1) {
         return;
     }
 
+    uint16_t cid = hid_host_cid;
     btstack_hid_parser_t parser;
     btstack_hid_parser_init(
         &parser,
-        hid_descriptor_storage_get_descriptor_data(hid_host_cid),
-        hid_descriptor_storage_get_descriptor_len(hid_host_cid),
+        hid_descriptor_storage_get_descriptor_data(cid),
+        hid_descriptor_storage_get_descriptor_len(cid),
         HID_REPORT_TYPE_INPUT,
         &report[1],
         report_len - 1);
@@ -319,13 +355,11 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         case HCI_EVENT_HID_META:
             switch (hci_event_hid_meta_get_subevent_code(packet)) {
                 case HID_SUBEVENT_INCOMING_CONNECTION:
-                    // Match the HID Host API available in the repository's Pico SDK 2.2.0.
-                    // In that BTstack revision this event is accepted directly by HID CID.
                     hid_host_cid = hid_subevent_incoming_connection_get_hid_cid(packet);
                     app_state = APP_CONNECTING;
                     gap_inquiry_stop();
-                    printf("Incoming HID connection, cid=0x%04x. Accepting.\n", hid_host_cid);
-                    hid_host_accept_connection(hid_host_cid, HID_PROTOCOL_MODE_REPORT);
+                    printf("Incoming HID connection, cid=0x%04x. Accepting.\n", (uint16_t)hid_host_cid);
+                    hid_host_accept_connection((uint16_t)hid_host_cid, HID_PROTOCOL_MODE_REPORT);
                     break;
 
                 case HID_SUBEVENT_CONNECTION_OPENED: {
@@ -341,7 +375,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     hid_host_cid = hid_subevent_connection_opened_get_hid_cid(packet);
                     app_state = APP_CONNECTED;
                     hid_descriptor_available = false;
-                    printf("\nHID HOST CONNECTED, cid=0x%04x\n", hid_host_cid);
+                    printf("\nHID HOST CONNECTED, cid=0x%04x\n", (uint16_t)hid_host_cid);
                     break;
                 }
 
@@ -352,13 +386,19 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                         break;
                     }
 
+                    uint16_t cid = hid_host_cid;
+                    uint16_t descriptor_len = hid_descriptor_storage_get_descriptor_len(cid);
+                    const uint8_t *descriptor = hid_descriptor_storage_get_descriptor_data(cid);
+
                     hid_descriptor_available = true;
-                    uint16_t descriptor_len = hid_descriptor_storage_get_descriptor_len(hid_host_cid);
-                    const uint8_t *descriptor = hid_descriptor_storage_get_descriptor_data(hid_host_cid);
 
                     printf("HID descriptor available (%u bytes).\n", descriptor_len);
                     printf_hexdump(descriptor, descriptor_len);
-                    printf("\nPOC READY - press keys on the keyboard.\n");
+                    printf("\nPOC READY - USB will re-enumerate with the keyboard descriptor.\n");
+
+                    // Core0 disconnects/reconnects TinyUSB so the computer asks for
+                    // the exact report descriptor obtained from the BKB-3G.
+                    g_usb_reinit_request = true;
                     break;
                 }
 
@@ -378,12 +418,19 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     break;
                 }
 
-                case HID_SUBEVENT_CONNECTION_CLOSED:
+                case HID_SUBEVENT_CONNECTION_CLOSED: {
+                    bool had_usb_descriptor = hid_descriptor_available;
                     printf("HID connection closed. Restarting discovery.\n");
                     hid_host_cid = 0;
                     hid_descriptor_available = false;
+                    if (had_usb_descriptor) {
+                        // Revert USB to the built-in fallback descriptor while no
+                        // Bluetooth HID device is connected.
+                        g_usb_reinit_request = true;
+                    }
                     start_inquiry();
                     break;
+                }
 
                 default:
                     break;
@@ -421,4 +468,24 @@ void bkb3g_classic_hid_init(void) {
     hci_add_event_handler(&hci_event_callback_registration);
 
     hci_power_control(HCI_POWER_ON);
+}
+
+// Compatibility hooks used by the existing dynamic TinyUSB descriptor code.
+// Despite the historical BLE names, these now expose the Classic HID state.
+bool is_ble_app_state_ready(void) {
+    return app_state == APP_CONNECTED && hid_descriptor_available && hid_host_cid != 0;
+}
+
+const uint8_t *get_ble_hid_report_descriptor_data(void) {
+    if (!is_ble_app_state_ready()) {
+        return NULL;
+    }
+    return hid_descriptor_storage_get_descriptor_data((uint16_t)hid_host_cid);
+}
+
+uint16_t get_ble_hid_report_descriptor_len(void) {
+    if (!is_ble_app_state_ready()) {
+        return 0;
+    }
+    return hid_descriptor_storage_get_descriptor_len((uint16_t)hid_host_cid);
 }
