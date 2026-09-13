@@ -5,7 +5,8 @@
 
 #include "btstack.h"
 
-#define TARGET_NAME "BKB-3G"
+#define TARGET_NAME "Bluetooth keyboard 3.0"
+#define TARGET_NAME_ALIAS "BKB-3G"
 #define INQUIRY_DURATION_1280MS 5
 #define MAX_DISCOVERED_DEVICES 20
 #define HID_DESCRIPTOR_STORAGE_SIZE 512
@@ -57,12 +58,11 @@ static int device_index_for_address(const bd_addr_t address) {
 }
 
 static bool target_name_matches(const char *name) {
-    return strcmp(name, TARGET_NAME) == 0;
+    return strcmp(name, TARGET_NAME) == 0 || strcmp(name, TARGET_NAME_ALIAS) == 0;
 }
 
 static void print_target_found(const bd_addr_t address, const char *source) {
-    printf("\nTarget '%s' found via %s: %s\n",
-           TARGET_NAME,
+    printf("\nTarget keyboard found via %s: %s\n",
            source,
            bd_addr_to_str(address));
 }
@@ -73,6 +73,7 @@ static void start_inquiry(void) {
     app_state = APP_INQUIRY;
 
     printf("\nScanning for Bluetooth Classic devices...\n");
+    printf("Target names: '%s' or '%s'.\n", TARGET_NAME, TARGET_NAME_ALIAS);
     printf("Put the keyboard in pairing mode (FN+1, FN+2 or FN+3 until the white LED blinks).\n");
 
     int status = gap_inquiry_start(INQUIRY_DURATION_1280MS);
@@ -89,7 +90,7 @@ static void connect_target(const bd_addr_t address) {
     gap_inquiry_stop();
 
     printf("Opening Classic HID connection to %s...\n", bd_addr_to_str(target_addr));
-    printf("If a 6-digit passkey is printed below, type it on the BKB-3G and press Enter.\n");
+    printf("If a 6-digit passkey is printed below, type it on the keyboard and press Enter.\n");
 
     uint8_t status = hid_host_connect(target_addr, HID_PROTOCOL_MODE_REPORT, &hid_host_cid);
     if (status != ERROR_CODE_SUCCESS) {
@@ -311,7 +312,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         case HCI_EVENT_USER_PASSKEY_NOTIFICATION: {
             uint32_t passkey = little_endian_read_32(packet, 8);
             printf("\nPAIRING PASSKEY: %06" PRIu32 "\n", passkey);
-            printf("Type this number on the BKB-3G and press Enter.\n\n");
+            printf("Type this number on the keyboard and press Enter.\n\n");
             break;
         }
 
@@ -357,7 +358,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 
                     printf("HID descriptor available (%u bytes).\n", descriptor_len);
                     printf_hexdump(descriptor, descriptor_len);
-                    printf("\nPOC READY - press keys on the BKB-3G.\n");
+                    printf("\nPOC READY - press keys on the keyboard.\n");
                     break;
                 }
 
