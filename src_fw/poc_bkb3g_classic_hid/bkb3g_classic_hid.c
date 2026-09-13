@@ -89,7 +89,6 @@ static void connect_target(const bd_addr_t address) {
     memcpy(target_addr, address, sizeof(bd_addr_t));
     app_state = APP_CONNECTING;
 
-    // If inquiry is still running, stop it before opening the HID connection.
     gap_inquiry_stop();
 
     printf("Opening Classic HID connection to %s...\n", bd_addr_to_str(target_addr));
@@ -228,8 +227,6 @@ static void enqueue_usb_hid_report(const uint8_t *report, uint16_t report_len) {
         return;
     }
 
-    // Classic HID interrupt reports include the HID DATA header 0xA1.
-    // TinyUSB needs the HID report itself, beginning with the Report ID.
     if (report_len < 2 || report[0] != 0xA1) {
         return;
     }
@@ -260,10 +257,8 @@ static void handle_hid_report(uint8_t *packet) {
         return;
     }
 
-    // Forward the complete HID report to Core0/TinyUSB first.
     enqueue_usb_hid_report(report, report_len);
 
-    // Also parse it for UART diagnostics.
     if (report_len < 2 || report[0] != 0xA1) {
         return;
     }
@@ -396,8 +391,6 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     printf_hexdump(descriptor, descriptor_len);
                     printf("\nPOC READY - USB will re-enumerate with the keyboard descriptor.\n");
 
-                    // Core0 disconnects/reconnects TinyUSB so the computer asks for
-                    // the exact report descriptor obtained from the BKB-3G.
                     g_usb_reinit_request = true;
                     break;
                 }
@@ -424,8 +417,6 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     hid_host_cid = 0;
                     hid_descriptor_available = false;
                     if (had_usb_descriptor) {
-                        // Revert USB to the built-in fallback descriptor while no
-                        // Bluetooth HID device is connected.
                         g_usb_reinit_request = true;
                     }
                     start_inquiry();
@@ -446,7 +437,6 @@ void bkb3g_classic_hid_init(void) {
     l2cap_init();
 
 #ifdef ENABLE_BLE
-    // The Pico SDK HID Host example links BLE too; SM supports cross-transport key derivation.
     sm_init();
 #endif
 
@@ -460,14 +450,31 @@ void bkb3g_classic_hid_init(void) {
     hci_set_inquiry_mode(INQUIRY_MODE_RSSI_AND_EIR);
     gap_ssp_set_io_capability(SSP_IO_CAPABILITY_DISPLAY_ONLY);
     gap_set_local_name("Remapper BKB3G POC 00:00:00:00:00:00");
-
-    // Also accept reconnects initiated by a previously paired keyboard.
     gap_discoverable_control(1);
 
     hci_event_callback_registration.callback = &packet_handler;
     hci_add_event_handler(&hci_event_callback_registration);
 
     hci_power_control(HCI_POWER_ON);
+}
+
+// Core1 entry point. Keeping all BTstack/CYW43 code in this translation unit is
+// intentional: BTstack and TinyUSB both define hid_report_type_t, so their HID
+// headers must not be included by the same .c file.
+void bkb3g_classic_hid_core_main(void) {
+    printf("\n=== Remapper BKB-3G Classic HID -> USB HID POC ===\n");
+    printf("Target: Bluetooth keyboard 3.0 / BKB-3G\n");
+    printf("Bluetooth side: Classic HID Host (BR/EDR)\n");
+    printf("USB side: TinyUSB HID Device\n\n");
+
+    if (cyw43_arch_init() != PICO_OK) {
+        panic("cyw43_arch_init failed");
+    }
+
+    bkb3g_classic_hid_init();
+    btstack_run_loop_execute();
+
+    cyw43_arch_deinit();
 }
 
 // Compatibility hooks used by the existing dynamic TinyUSB descriptor code.
