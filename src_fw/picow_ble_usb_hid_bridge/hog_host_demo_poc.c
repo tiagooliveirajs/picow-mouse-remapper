@@ -1,12 +1,14 @@
-// PICO-05 wrapper around the existing HOGP host implementation.
+// PICO-06 wrapper around the existing HOGP host implementation.
 //
 // The upstream-derived hog_host_demo.c remains intact. This wrapper owns the
-// product boundary around it: normalize BTstack report payloads, enqueue raw
-// BLE HID reports without applying the old POC remap, and attach the persistent
-// identity/profile layer only after HIDS is READY.
+// product boundary around it: normalize BTstack reports, consume Logitech HID++
+// control traffic when a source needs real held-state, enqueue ordinary raw HOGP
+// reports, and run identity/remap persistence on the BTstack Core1 loop.
 
 #include "btstack.h"
 #include "device_profile.h"
+#include "logitech_hidpp.h"
+#include "remap_profile.h"
 #include "remote_hid_queue.h"
 
 static inline const uint8_t *poc_btstack_hid_report_payload(const uint8_t *event)
@@ -22,23 +24,13 @@ static inline uint16_t poc_btstack_hid_report_payload_len(const uint8_t *event)
     return len > 0 ? (uint16_t)(len - 1) : 0;
 }
 
-static bool pico05_remote_enqueue(ULONG queue_kind, PVOID data);
+static bool pico06_remote_enqueue(ULONG queue_kind, PVOID data);
 
-// hog_host_demo.c historically calls CMN_Enqueue for reports. Redirect only
-// this translation unit's call to the PICO-05 raw queue, bypassing Common.c's
-// PICO-01 Forward->Left transformation. The old POC code stays available as
-// engineering provenance but is no longer in the active production path.
-#define CMN_Enqueue(kind, data) pico05_remote_enqueue((kind), (data))
-
-// Replace the host entrypoint so the wrapper can attach identity/profile
-// polling on the BTstack Core1 run loop without editing the upstream-derived
-// source file itself.
+#define CMN_Enqueue(kind, data) pico06_remote_enqueue((kind), (data))
 #define ble_host_main poc_ble_host_main_original
 
 // Pico SDK 2.2.0's HIDS client includes the Report ID as byte 0 of the event
-// payload and also exposes it in metadata. Our ST_HID_RPT keeps the ID only in
-// report_id, so strip the duplicated byte before the included HOGP source sees
-// the payload.
+// payload and also exposes it in metadata. ST_HID_RPT keeps it only in report_id.
 #define gattservice_subevent_hid_report_get_report     poc_btstack_hid_report_payload
 #define gattservice_subevent_hid_report_get_report_len poc_btstack_hid_report_payload_len
 #include "hog_host_demo.c"
@@ -47,21 +39,26 @@ static bool pico05_remote_enqueue(ULONG queue_kind, PVOID data);
 #undef ble_host_main
 #undef CMN_Enqueue
 
-#define PICO05_PROFILE_POLL_MS 100u
+#define PICO06_PROFILE_POLL_MS 50u
 
-static btstack_timer_source_t g_pico05_profile_timer;
-static uint16_t g_pico05_attached_hids_cid;
-static bool g_pico05_profile_attached;
+static btstack_timer_source_t g_pico06_profile_timer;
+static uint16_t g_pico06_attached_hids_cid;
+static bool g_pico06_profile_attached;
 
-static bool pico05_remote_enqueue(ULONG queue_kind, PVOID data)
+static bool pico06_remote_enqueue(ULONG queue_kind, PVOID data)
 {
-    if (queue_kind != CMN_QUE_KIND_HID_RPT || data == NULL) {
-        return false;
+    if (queue_kind != CMN_QUE_KIND_HID_RPT || data == NULL) return false;
+
+    const ST_HID_RPT *report = (const ST_HID_RPT *)data;
+    if (logitech_hidpp_process_report(report->report_id,
+                                      report->report,
+                                      report->report_len)) {
+        return true;
     }
-    return remote_hid_queue_enqueue((const ST_HID_RPT *)data);
+    return remote_hid_queue_enqueue(report);
 }
 
-static void pico05_profile_poll(btstack_timer_source_t *timer)
+static void pico06_profile_poll(btstack_timer_source_t *timer)
 {
     (void)timer;
 
@@ -69,15 +66,18 @@ static void pico05_profile_poll(btstack_timer_source_t *timer)
     const uint16_t current_cid = hids_cid;
 
     if (!ready || current_cid == 0) {
-        if (g_pico05_profile_attached) {
+        if (g_pico06_profile_attached) {
+            logitech_hidpp_on_disconnect();
             device_profile_on_disconnect();
-            g_pico05_profile_attached = false;
-            g_pico05_attached_hids_cid = 0;
-            printf("[PICO-05] profile detached\n");
+            g_pico06_profile_attached = false;
+            g_pico06_attached_hids_cid = 0;
+            printf("[PICO-06] profile detached\n");
         }
-    } else if (!g_pico05_profile_attached ||
-               current_cid != g_pico05_attached_hids_cid) {
-        if (g_pico05_profile_attached) {
+        remap_profile_core1_task();
+    } else if (!g_pico06_profile_attached ||
+               current_cid != g_pico06_attached_hids_cid) {
+        if (g_pico06_profile_attached) {
+            logitech_hidpp_on_disconnect();
             device_profile_on_disconnect();
         }
 
@@ -89,28 +89,32 @@ static void pico05_profile_poll(btstack_timer_source_t *timer)
                                          (uint8_t)remote_device.addr_type,
                                          descriptor,
                                          descriptor_len);
-            g_pico05_profile_attached = true;
-            g_pico05_attached_hids_cid = current_cid;
-            printf("[PICO-05] profile attached hids_cid=%u\n", current_cid);
+            g_pico06_profile_attached = true;
+            g_pico06_attached_hids_cid = current_cid;
+            logitech_hidpp_on_connect();
+            printf("[PICO-06] profile attached hids_cid=%u\n", current_cid);
         }
     }
 
-    btstack_run_loop_set_timer(&g_pico05_profile_timer, PICO05_PROFILE_POLL_MS);
-    btstack_run_loop_add_timer(&g_pico05_profile_timer);
+    if (g_pico06_profile_attached) {
+        remap_profile_core1_task();
+        logitech_hidpp_core1_task();
+    }
+
+    btstack_run_loop_set_timer(&g_pico06_profile_timer, PICO06_PROFILE_POLL_MS);
+    btstack_run_loop_add_timer(&g_pico06_profile_timer);
 }
 
 void ble_host_main(void)
 {
-    // Same initialization sequence as the original demo entrypoint, with the
-    // profile poll installed before the BTstack run loop starts.
     (void)picow_bt_example_init();
     picow_bt_example_main();
 
-    g_pico05_attached_hids_cid = 0;
-    g_pico05_profile_attached = false;
-    btstack_run_loop_set_timer_handler(&g_pico05_profile_timer, pico05_profile_poll);
-    btstack_run_loop_set_timer(&g_pico05_profile_timer, PICO05_PROFILE_POLL_MS);
-    btstack_run_loop_add_timer(&g_pico05_profile_timer);
+    g_pico06_attached_hids_cid = 0;
+    g_pico06_profile_attached = false;
+    btstack_run_loop_set_timer_handler(&g_pico06_profile_timer, pico06_profile_poll);
+    btstack_run_loop_set_timer(&g_pico06_profile_timer, PICO06_PROFILE_POLL_MS);
+    btstack_run_loop_add_timer(&g_pico06_profile_timer);
 
     btstack_run_loop_execute();
 }
@@ -125,9 +129,6 @@ uint8_t poc_hids_send_hidpp_long(const uint8_t *payload, uint8_t payload_len)
     if (hids_cid == 0 || payload == NULL || payload_len == 0) {
         return ERROR_CODE_UNKNOWN_CONNECTION_IDENTIFIER;
     }
-
-    // Retained as the real Logitech HID++ transport backend for PICO-06. It is
-    // not invoked automatically by PICO-05 passthrough profiles.
     return hids_client_send_write_report(hids_cid,
                                          0x11,
                                          HID_REPORT_TYPE_OUTPUT,
