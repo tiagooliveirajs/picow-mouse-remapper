@@ -32,14 +32,12 @@
 #include "pico_hat_ui.h"
 
 #define LED_BLINKING_INTERVAL 200 // ms
-#define PICO04_PENDING_OUTPUTS 3u
+#define PICO04_PENDING_OUTPUTS 2u
 
 // Kept only because the PICO-01 BLE host still writes this legacy flag when it
 // reaches READY. PICO-04 deliberately consumes/ignores it: the firmware-owned
 // USB descriptor is stable and must not disconnect/re-enumerate on BLE changes.
 volatile bool g_usb_reinit_request = false;
-
-static volatile bool g_pico04_toggle_left_escape_request = false;
 
 void usb_dev_main(void);
 void hid_task(void);
@@ -112,12 +110,9 @@ void pico_hat_event_log_task(void)
 
     pico_hat_diag_handle_event(&event);
 
-    // PICO-04 validation only: B/KEY2 toggles a volatile Left -> Escape route.
-    // The production profile engine replaces this hook in PICO-06.
-    if (event.input == PICO_HAT_INPUT_KEY2 && event.pressed) {
-        g_pico04_toggle_left_escape_request = true;
-    }
-
+    // PICO-04 must not assign remap semantics to HAT controls. Escape is a
+    // product mapping owned exclusively by DEFAULT_REMAP and is introduced by
+    // the profile/remap engine in PICO-06.
     printf("[PICO-04] %s %s lock=%u\r\n",
            pico_hat_ui_input_name(event.input),
            event.pressed ? "DOWN" : "UP",
@@ -149,8 +144,9 @@ void tud_resume_cb(void)
 //--------------------------------------------------------------------+
 
 // Convert the PICO-01 remote-layout queue into fixed PICO-04 USB reports and
-// send at most one USB report per call. This keeps TinyUSB servicing bounded
-// even when one remote report produces both mouse and keyboard transitions.
+// send at most one USB report per call. The stable descriptor already exposes
+// Keyboard + Mouse from boot, but PICO-04 itself only emits passthrough mouse
+// traffic; keyboard output is owned by the Default Remap engine in PICO-06.
 bool send_hid_report(void)
 {
     static ST_HID_RPT remote_report;
@@ -167,7 +163,7 @@ bool send_hid_report(void)
     }
 
     // A BLE disconnect is a hard state boundary. Drop stale raw/pending traffic
-    // and synthesize neutral mouse/keyboard state before resetting device maps.
+    // and synthesize neutral mouse state before resetting device maps.
     if (previous_ble_ready && !ble_ready) {
         pending_index = 0;
         pending_count = (uint8_t)canonical_hid_neutralize(pending,
@@ -177,17 +173,6 @@ bool send_hid_report(void)
         printf("[PICO-04] BLE disconnect -> neutral USB outputs\r\n");
     }
     previous_ble_ready = ble_ready;
-
-    // Local validation toggle is processed on the same Core0 path that owns USB
-    // output so switching modes cannot race a report already being transmitted.
-    if (g_pico04_toggle_left_escape_request && pending_index >= pending_count) {
-        g_pico04_toggle_left_escape_request = false;
-        pending_index = 0;
-        pending_count = (uint8_t)canonical_hid_set_left_escape_test(
-            !canonical_hid_left_escape_test_enabled(),
-            pending,
-            PICO04_PENDING_OUTPUTS);
-    }
 
     // If no canonical output is pending, translate one queued remote report.
     if (pending_index >= pending_count) {
