@@ -45,7 +45,7 @@ add_executable(picow_ble_usb_hid_bridge
     logitech_hidpp.c
     remap_engine.c
     pico_hat_ui.c
-    pico07_ui_typefirst.c
+    pico07_status_pairing_test_ui.c
     )
 
 # BTstack and TinyUSB publish overlapping HID identifiers. Keep the PICO-05
