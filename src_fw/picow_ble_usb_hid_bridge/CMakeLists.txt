@@ -39,7 +39,9 @@ add_executable(picow_ble_usb_hid_bridge
     picow_bt_example_common.c
     Common.c
     canonical_hid.c
+    classic_keyboard.c
     device_profile.c
+    keyboard_hid_queue.c
     remote_hid_queue.c
     remap_profile.c
     logitech_hidpp.c
@@ -54,10 +56,8 @@ add_executable(picow_ble_usb_hid_bridge
 set_source_files_properties(device_profile.c PROPERTIES
     COMPILE_OPTIONS "-include;btstack.h;-include;pico/critical_section.h")
 
-# PICO-07 keyboard-pairing validation: keep discovery open for 50 seconds
-# instead of the transport demo's 5-second scan window. The override is scoped
-# to the HOGP wrapper translation unit and leaves the 8-second connect timeout
-# untouched.
+# PICO-07 LE discovery remains available for mouse/composite validation. The
+# BKB-3G keyboard path is now Bluetooth Classic HID and owns its own inquiry.
 set_source_files_properties(hog_host_demo_poc.c PROPERTIES
     COMPILE_OPTIONS "-include;${CMAKE_CURRENT_LIST_DIR}/pico07_scan_timeout_override.h")
 
@@ -79,7 +79,9 @@ target_include_directories(picow_ble_usb_hid_bridge PRIVATE
     )
 target_compile_definitions(picow_ble_usb_hid_bridge PRIVATE
     CYW43_LWIP=0
-    PICO_CORE1_STACK_SIZE=0x1000
+    # Core1 uses multicore_launch_core1_with_stack() with an explicit 8 KiB
+    # SRAM buffer. Do not reserve the default linker-owned stack1 region.
+    PICO_CORE1_STACK_SIZE=0
     )
 pico_btstack_make_gatt_header(picow_ble_usb_hid_bridge PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/hog_host_demo.gatt

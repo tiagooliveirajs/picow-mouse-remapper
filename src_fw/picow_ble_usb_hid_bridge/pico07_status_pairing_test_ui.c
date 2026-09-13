@@ -1,21 +1,23 @@
-// PICO-07 provisional pairing validation UI.
+// PICO-08 pairing validation UI.
 //
-// This candidate deliberately bypasses the Saved Devices pairing navigation.
-// Pairing is entered directly from STATUS so physical validation can isolate
-// BLE pairing from the final product navigation:
+// The existing provisional STATUS layout is retained while the proven BKB-3G
+// Bluetooth Classic HID POC is incorporated into the product firmware:
 //
-//   K1 -> Mouse pairing
-//   K2 -> Keyboard pairing
-//   K3 -> Composite Mouse+Keyboard pairing
+//   K1 -> BLE mouse pairing
+//   K2 -> Bluetooth Classic BKB-3G keyboard pairing
+//   K3 -> BLE composite pairing
 //
-// STATUS itself never scans. Entering one of the three pairing flows starts
-// discovery automatically. Report Map classification remains authoritative.
+// The visible STATUS label intentionally remains generic (`KEYBOARD OPTIONS`)
+// because this is a temporary validation layout. Mouse/composite continue via
+// PICO-07 HOGP discovery; Keyboard Options routes to the Classic HID host.
 
 #define pico06_ui_init pico06_ui_init_legacy
 #define pico06_ui_task pico06_ui_task_legacy
 #include "pico06_ui_v2.c"
 #undef pico06_ui_init
 #undef pico06_ui_task
+
+#include "classic_keyboard.h"
 
 typedef enum {
     TEST_PAIR_IDLE = 0,
@@ -43,6 +45,8 @@ static uint32_t g_test_action_revision;
 static bool g_test_dirty;
 static ui_screen_t g_test_last_screen;
 static char g_test_message[UI_TEXT_MAX + 1u];
+static classic_keyboard_snapshot_t g_test_classic;
+static uint32_t g_test_classic_revision;
 
 static const char *test_target_name(void)
 {
@@ -81,6 +85,17 @@ static void test_mark_tried(const pico07_scan_result_t *result)
 
 static void test_refresh_pair_snapshot(void)
 {
+    if (g_test_target == PICO07_TYPE_KEYBOARD) {
+        classic_keyboard_snapshot_t classic;
+        if (classic_keyboard_get_snapshot(&classic) &&
+            classic.revision != g_test_classic_revision) {
+            g_test_classic_revision = classic.revision;
+            g_test_classic = classic;
+            g_test_dirty = true;
+        }
+        return;
+    }
+
     pico07_pairing_snapshot_t pair;
     if (pico07_pairing_get_snapshot(&pair) && pair.revision != g_pair_revision) {
         g_pair_revision = pair.revision;
@@ -100,7 +115,7 @@ static void test_render_begin(void)
         set_line(2, COLOR_WHITE, "K2: KEYBOARD OPTIONS");
         set_line(3, COLOR_WHITE, "K3: COMPOSITE OPTIONS");
         set_line(5, COLOR_CYAN, "PAIRING TEST LAYOUT");
-        set_line(7, COLOR_GRAY, "NO AUTO SEARCH HERE");
+        set_line(7, COLOR_GRAY, "USB HID STAYS STABLE");
         set_line(8, COLOR_GRAY, "JOY PRESS = HOME");
     } else {
         set_title("PAIR %s", test_target_name());
@@ -108,6 +123,20 @@ static void test_render_begin(void)
             set_line(1, COLOR_WHITE, "%s",
                      g_test_message[0] ? g_test_message : "PAIRING FAILED");
             set_line(2, COLOR_WHITE, "JOY PRESS RETRY");
+        } else if (g_test_target == PICO07_TYPE_KEYBOARD) {
+            const char *message = g_test_classic.message[0]
+                ? g_test_classic.message
+                : "SEARCHING CLASSIC KBD";
+            set_line(1, COLOR_WHITE, "%s", message);
+            set_line(2, COLOR_CYAN, "TARGET BKB-3G");
+            set_line(3, COLOR_WHITE, "BLUETOOTH CLASSIC HID");
+            if (g_test_classic.connected) {
+                set_line(4, COLOR_CYAN, "USB KEYBOARD ACTIVE");
+            } else if (g_test_classic.saved_peer) {
+                set_line(4, COLOR_WHITE, "SAVED PEER AVAILABLE");
+            } else {
+                set_line(4, COLOR_WHITE, "FN+1/2/3 PAIR MODE");
+            }
         } else if (g_test_phase == TEST_PAIR_DELETE_WRONG_TYPE) {
             set_line(1, COLOR_WHITE, "WRONG HID TYPE");
             set_line(2, COLOR_WHITE, "REMOVING TEMP BOND");
@@ -159,8 +188,25 @@ static void test_start_scan(bool reset_tried)
         g_test_tried_count = 0u;
     }
     g_test_have_current = false;
-    g_test_phase = TEST_PAIR_SCAN;
     g_test_message[0] = '\0';
+
+    if (g_test_target == PICO07_TYPE_KEYBOARD) {
+        classic_keyboard_snapshot_t classic;
+        if (classic_keyboard_get_snapshot(&classic)) {
+            g_test_classic = classic;
+            g_test_classic_revision = classic.revision;
+        }
+        g_test_phase = TEST_PAIR_CONNECT;
+        g_test_action_revision = g_test_classic_revision;
+        if (!classic_keyboard_request_pair()) {
+            g_test_phase = TEST_PAIR_ERROR;
+            snprintf(g_test_message, sizeof(g_test_message), "CLASSIC COMMAND BUSY");
+        }
+        g_test_dirty = true;
+        return;
+    }
+
+    g_test_phase = TEST_PAIR_SCAN;
     g_test_action_revision = g_pair.revision;
     if (!pico07_pairing_request_scan()) {
         g_test_phase = TEST_PAIR_ERROR;
@@ -207,9 +253,41 @@ static void test_request_next_candidate(void)
     g_test_dirty = true;
 }
 
+static void test_publish_classic_success(void)
+{
+    pico07_pairing_snapshot_t pair;
+    if (pico07_pairing_get_snapshot(&pair)) {
+        g_pair = pair;
+        g_pair_revision = pair.revision;
+    }
+    g_pair.last_type = PICO07_TYPE_KEYBOARD;
+    g_pair.last_was_new_pair = true;
+    snprintf(g_pair.message, sizeof(g_pair.message), "KEYBOARD CONNECTED");
+    g_test_pair_active = false;
+    set_screen(SCREEN_DEVICE_SUCCESS);
+}
+
 static void test_process_pair_state(void)
 {
     if (!g_test_pair_active || g_screen != SCREEN_PAIRING) return;
+
+    if (g_test_target == PICO07_TYPE_KEYBOARD) {
+        if (g_test_classic.state == CLASSIC_KEYBOARD_READY &&
+            g_test_classic.connected) {
+            test_publish_classic_success();
+            return;
+        }
+        if (g_test_classic.state == CLASSIC_KEYBOARD_ERROR &&
+            g_test_classic.revision != g_test_action_revision) {
+            g_test_phase = TEST_PAIR_ERROR;
+            snprintf(g_test_message, sizeof(g_test_message), "%s",
+                     g_test_classic.message[0]
+                         ? g_test_classic.message
+                         : "CLASSIC PAIR FAILED");
+            g_test_dirty = true;
+        }
+        return;
+    }
 
     if (g_test_phase == TEST_PAIR_SCAN) {
         if (g_pair.state == PICO07_PAIR_SCANNING ||
@@ -299,7 +377,11 @@ static void test_handle_status_pressed(pico_hat_input_t input)
 static void test_handle_pairing_pressed(pico_hat_input_t input)
 {
     if (input == PICO_HAT_INPUT_KEY1) {
-        (void)pico07_pairing_request_cancel();
+        if (g_test_target == PICO07_TYPE_KEYBOARD) {
+            (void)classic_keyboard_request_cancel();
+        } else {
+            (void)pico07_pairing_request_cancel();
+        }
         g_test_pair_active = false;
         g_test_dirty = true;
         set_screen(SCREEN_STATUS);
@@ -319,6 +401,8 @@ void pico06_ui_init(void)
     g_test_action_revision = 0u;
     g_test_dirty = true;
     g_test_last_screen = SCREEN_HOME;
+    g_test_classic_revision = 0u;
+    memset(&g_test_classic, 0, sizeof(g_test_classic));
     memset(g_test_message, 0, sizeof(g_test_message));
 }
 
@@ -346,6 +430,9 @@ void pico06_ui_task(void)
     if (g_was_locked) {
         g_was_locked = false;
         drain_source_events();
+        if (g_test_pair_active && g_test_target == PICO07_TYPE_KEYBOARD) {
+            (void)classic_keyboard_request_cancel();
+        }
         g_test_pair_active = false;
         set_screen(SCREEN_HOME);
         return;

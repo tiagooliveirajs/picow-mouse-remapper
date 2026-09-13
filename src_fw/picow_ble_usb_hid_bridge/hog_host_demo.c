@@ -42,6 +42,7 @@
 
 #include "btstack_config.h"
 #include "btstack.h"
+#include "classic_keyboard.h"
 #include "hog_host_demo.h"
 #include "picow_bt_example_common.h"
 #include "pico/cyw43_arch.h"
@@ -355,7 +356,15 @@ static void packet_handler (uint8_t packet_type, uint16_t channel,
                     break;
                 }
 
-                case HCI_EVENT_DISCONNECTION_COMPLETE:
+                case HCI_EVENT_DISCONNECTION_COMPLETE: {
+                    const hci_con_handle_t disconnected =
+                        hci_event_disconnection_complete_get_connection_handle(packet);
+                    // Core1 now owns two independent transports. A Classic HID
+                    // keyboard disconnect must not reset the BLE mouse state.
+                    if (connection_handle == HCI_CON_HANDLE_INVALID ||
+                        disconnected != connection_handle) {
+                        break;
+                    }
                     connection_handle = HCI_CON_HANDLE_INVALID;
                     printf("\nDisconnected.\n");
                     btstack_run_loop_remove_timer(&connection_timer);
@@ -367,6 +376,7 @@ static void packet_handler (uint8_t packet_type, uint16_t channel,
                     }
                     hog_start_connect();
                     break;
+                }
 
                 case HCI_EVENT_META_GAP:
                     if (hci_event_gap_meta_get_subevent_code(packet) !=
@@ -503,6 +513,11 @@ int btstack_main(int argc, const char * argv[]){
     att_server_init(profile_data, NULL, NULL);
     hids_client_init(hid_descriptor_storage, sizeof(hid_descriptor_storage));
 
+    // The BKB-3G POC proved Classic HID on the same CYW43 controller. Register
+    // the Classic HID Host before powering HCI so its callbacks see the initial
+    // BTSTACK_EVENT_STATE transition alongside the BLE HOGP transport.
+    classic_keyboard_core1_init();
+
     hci_event_callback_registration.callback = &packet_handler;
     hci_add_event_handler(&hci_event_callback_registration);
     sm_event_callback_registration.callback = &sm_packet_handler;
@@ -510,6 +525,8 @@ int btstack_main(int argc, const char * argv[]){
 
     setvbuf(stdin, NULL, _IONBF, 0);
     g_reconnect_scan_only = false;
+    connection_handle = HCI_CON_HANDLE_INVALID;
+    hids_cid = 0u;
     app_state = W4_WORKING;
     hci_power_control(HCI_POWER_ON);
     return 0;
