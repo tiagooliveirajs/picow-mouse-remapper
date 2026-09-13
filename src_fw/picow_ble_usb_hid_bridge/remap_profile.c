@@ -299,6 +299,35 @@ bool remap_profile_request_apply(const remap_profile_config_t *config,
     return true;
 }
 
+bool remap_profile_delete_saved(uint8_t addr_type, const uint8_t addr[6])
+{
+    if (!g_initialized || addr == NULL) return false;
+    store_load();
+    const int slot = find_record(addr_type, addr);
+    if (slot < 0) return true; // no saved remap is already the desired state
+
+    remap_store_v1_t previous;
+    memcpy(&previous, &g_store, sizeof(previous));
+    memset(&g_store.records[slot], 0, sizeof(g_store.records[slot]));
+    if (!store_commit()) {
+        memcpy(&g_store, &previous, sizeof(g_store));
+        return false;
+    }
+
+    critical_section_enter_blocking(&g_lock);
+    if (g_snapshot.connected && identity_equal(g_snapshot.identity_addr_type,
+                                               g_snapshot.identity_addr,
+                                               addr_type, addr)) {
+        g_snapshot.restored = false;
+        remap_profile_make_passthrough(&g_snapshot.active);
+        ++g_snapshot.revision;
+    }
+    critical_section_exit(&g_lock);
+
+    printf("[PICO-07] remap profile deleted addr=%s\n", bd_addr_to_str(addr));
+    return true;
+}
+
 static void fail_pending_if_disconnected(void)
 {
     remap_profile_config_t requested;
