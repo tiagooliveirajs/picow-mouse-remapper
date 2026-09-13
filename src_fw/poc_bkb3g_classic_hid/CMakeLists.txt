@@ -30,8 +30,11 @@ target_include_directories(bkb3g_classic_hid PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
 )
 
-# UART is used for the POC log. USB remains free for the future HID-device stage.
-pico_enable_stdio_usb(bkb3g_classic_hid 0)
+# Development POC console:
+# - USB CDC is enabled so logs are available over the same USB cable as /dev/ttyACM*.
+# - UART remains enabled as a fallback for low-level debugging.
+# This POC does not expose USB HID yet, so USB CDC does not conflict with the final bridge stage.
+pico_enable_stdio_usb(bkb3g_classic_hid 1)
 pico_enable_stdio_uart(bkb3g_classic_hid 1)
 
 pico_add_extra_outputs(bkb3g_classic_hid)
