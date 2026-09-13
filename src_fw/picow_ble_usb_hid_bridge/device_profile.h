@@ -4,8 +4,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "btstack.h"
-
 typedef enum {
     DEVICE_CAP_MOUSE          = 1u << 0,
     DEVICE_CAP_KEYBOARD       = 1u << 1,
@@ -64,33 +62,22 @@ typedef struct {
     device_drag_backend_t auto_forward_backend;
 } device_profile_snapshot_t;
 
-// Called on Core0 before launching the BTstack Core1 runtime.
 void device_profile_init(void);
 
-// Called by the HOGP host after the HID service is ready. The module resolves
-// the bonded peer identity, fingerprints/classifies the Report Map, restores or
-// creates a per-bond profile, and asynchronously queries the standard PnP ID.
-void device_profile_on_hids_ready(hci_con_handle_t connection_handle,
+// The connection handle is represented as its 16-bit wire/runtime value here
+// so this public header does not import BTstack HID types into TinyUSB code.
+void device_profile_on_hids_ready(uint16_t connection_handle,
                                   const uint8_t peer_addr[6],
                                   uint8_t peer_addr_type,
                                   const uint8_t *report_descriptor,
                                   uint16_t report_descriptor_len);
 
-// Called on HCI disconnect. Persistent records remain intact.
 void device_profile_on_disconnect(void);
-
-// Cross-core read-only snapshot for diagnostics/UI and later gates.
 bool device_profile_get_snapshot(device_profile_snapshot_t *snapshot);
 
-// Resolve drag-fix policy per source button. AUTO only returns HID++ for a
-// qualified device+source pair. FORCE returns PROBE when a real HID++ probe is
-// meaningful, and UNSUPPORTED otherwise.
 device_drag_backend_t device_profile_resolve_drag_backend(device_source_button_t source,
                                                           device_drag_fix_policy_t policy);
 
-// PICO-05 deliberately leaves every newly created profile in PASSTHROUGH.
-// Therefore the legacy PICO-01 Forward->Left HID++ remap must stay disabled.
-// PICO-06 will consume the policy resolver when Default/Custom mappings exist.
 bool device_profile_forward_hidpp_remap_active(void);
 
 #endif // DEVICE_PROFILE_H
