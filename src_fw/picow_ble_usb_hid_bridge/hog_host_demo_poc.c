@@ -84,10 +84,23 @@ static le_device_addr_t g_pending_target;
 static uint8_t g_delete_addr_type;
 static uint8_t g_delete_addr[6];
 
+static pico07_device_type_t type_from_capabilities(uint32_t capabilities);
+
 static bool pico07_remote_enqueue(ULONG queue_kind, PVOID data)
 {
     if (queue_kind != CMN_QUE_KIND_HID_RPT || data == NULL) return false;
     const ST_HID_RPT *report = (const ST_HID_RPT *)data;
+
+    // PICO-07 may temporarily connect a keyboard in order to pair/classify it,
+    // but canonical keyboard forwarding does not exist until PICO-08. Do not
+    // let unclassified/keyboard reports enter the mouse canonical path.
+    if (g_managed_connection) {
+        device_profile_snapshot_t device;
+        if (!device_profile_get_snapshot(&device) || !device.connected) return true;
+        const pico07_device_type_t type = type_from_capabilities(device.capabilities);
+        if (type != PICO07_TYPE_MOUSE && type != PICO07_TYPE_COMPOSITE) return true;
+    }
+
     if (logitech_hidpp_process_report(report->report_id,
                                       report->report,
                                       report->report_len)) {
@@ -323,9 +336,6 @@ bool pico07_pairing_connection_timeout_owned(void)
 
     if (was_managed) {
         pair_publish_state(PICO07_PAIR_ERROR, "CONNECTION TIMEOUT");
-        // A user-selected target failed. Restore the existing preferred mouse;
-        // if that peer is itself unavailable, its next timeout is unmanaged and
-        // stops cleanly instead of scanning/auto-pairing a random HID.
         hog_start_connect();
     } else {
         pair_publish_state(PICO07_PAIR_ERROR, "DEVICE UNAVAILABLE");
@@ -336,6 +346,10 @@ bool pico07_pairing_connection_timeout_owned(void)
 bool pico07_pairing_idle_without_saved_device(void)
 {
     if (!g_pair_initialized) return false;
+    critical_section_enter_blocking(&g_pair_lock);
+    const pico07_pair_state_t state = g_pair_snapshot.state;
+    critical_section_exit(&g_pair_lock);
+    if (state == PICO07_PAIR_SUCCESS || state == PICO07_PAIR_ERROR) return true;
     pair_publish_state(PICO07_PAIR_IDLE, "NO ACTIVE MOUSE");
     return true;
 }
@@ -360,11 +374,9 @@ bool pico07_pairing_handle_connection_error(void)
     app_state = W4_WORKING;
 
     if (was_managed) {
-        // The HCI disconnect event will restore the preferred mouse.
         g_after_disconnect = AFTER_DISCONNECT_RESTORE_PRIMARY;
         pair_publish_state(PICO07_PAIR_ERROR, "PAIRING FAILED");
     } else {
-        // Never fall back to the legacy "scan first HID and connect" path.
         g_suppress_auto_reconnect_once = true;
         pair_publish_state(PICO07_PAIR_ERROR, "DEVICE UNAVAILABLE");
     }
@@ -434,8 +446,8 @@ bool pico07_pairing_handle_disconnect(void)
             return true;
         case AFTER_DISCONNECT_DELETE: {
             const bool ok = delete_saved_core1(g_delete_addr_type, g_delete_addr);
-            pair_publish_state(ok ? PICO07_PAIR_SUCCESS : PICO07_PAIR_ERROR,
-                               ok ? "DEVICE DELETED" : "DELETE FAILED");
+            if (ok) pair_publish_result(PICO07_TYPE_UNKNOWN, false, "DEVICE DELETED");
+            else pair_publish_state(PICO07_PAIR_ERROR, "DELETE FAILED");
             app_state = W4_WORKING;
             hog_start_connect();
             return true;
@@ -541,8 +553,8 @@ static void process_pair_command_core1(void)
                 gap_disconnect(connection_handle);
             } else {
                 const bool ok = delete_saved_core1(request.addr_type, request.addr);
-                pair_publish_state(ok ? PICO07_PAIR_SUCCESS : PICO07_PAIR_ERROR,
-                                   ok ? "DEVICE DELETED" : "DELETE FAILED");
+                if (ok) pair_publish_result(PICO07_TYPE_UNKNOWN, false, "DEVICE DELETED");
+                else pair_publish_state(PICO07_PAIR_ERROR, "DELETE FAILED");
             }
             break;
         }
@@ -598,17 +610,12 @@ static void classify_managed_connection_core1(void)
         return;
     }
 
-    // Keyboard pairing is persisted now, but simultaneous keyboard forwarding
-    // belongs to PICO-08. A newly paired keyboard is disconnected after the
-    // bond/DeviceRecord is confirmed, then the preferred mouse is restored.
-    pair_publish_result(type, g_managed_is_new_pair,
-                        g_managed_is_new_pair ? "KEYBOARD SAVED" : "KEYBOARD CONNECTED");
-    if (g_managed_is_new_pair) {
-        g_after_disconnect = AFTER_DISCONNECT_RESTORE_PRIMARY;
-        gap_disconnect(connection_handle);
-    } else {
-        g_managed_connection = false;
-    }
+    // A keyboard bond/DeviceRecord is validated in PICO-07, but keyboard input
+    // is intentionally not activated until PICO-08. Always return to the mouse
+    // peer after verification, whether this was a new or already-saved keyboard.
+    pair_publish_result(PICO07_TYPE_KEYBOARD, g_managed_is_new_pair, "KEYBOARD SAVED");
+    g_after_disconnect = AFTER_DISCONNECT_RESTORE_PRIMARY;
+    gap_disconnect(connection_handle);
     g_managed_is_new_pair = false;
 }
 
