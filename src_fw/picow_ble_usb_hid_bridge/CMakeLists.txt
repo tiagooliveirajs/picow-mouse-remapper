@@ -46,11 +46,14 @@ add_executable(picow_ble_usb_hid_bridge
     hog_host_demo_poc.c
     picow_bt_example_common.c
     Common.c
+    pico_hat_ui.c
+    pico_hat_diag.c
     )
 target_link_libraries(picow_ble_usb_hid_bridge
     pico_stdlib
     pico_multicore
     hardware_sync
+    hardware_spi
     pico_unique_id
     tinyusb_device
     tinyusb_board
