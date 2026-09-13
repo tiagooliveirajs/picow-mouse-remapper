@@ -44,6 +44,13 @@ add_executable(picow_ble_usb_hid_bridge
     pico_hat_ui.c
     pico_hat_diag.c
     )
+
+# BTstack and TinyUSB publish overlapping HID type/enumerator names. Keep the
+# BTstack-only profile implementation isolated instead of exposing btstack.h
+# through device_profile.h into main.c/TinyUSB.
+set_source_files_properties(device_profile.c PROPERTIES
+    COMPILE_OPTIONS "-include;btstack.h;-include;hardware/sync.h")
+
 target_link_libraries(picow_ble_usb_hid_bridge
     pico_stdlib
     pico_multicore
