@@ -29,7 +29,7 @@
 #include "Common.h"
 #include "canonical_hid.h"
 #include "device_profile.h"
-#include "pico_hat_diag.h"
+#include "pico05_status.h"
 #include "pico_hat_ui.h"
 #include "remote_hid_queue.h"
 
@@ -71,6 +71,7 @@ int main(void)
     // PICO-03 validated HAT baseline. LCD/input remains cooperative so USB HID
     // is serviced before local UI work in every Core0 pass.
     pico_hat_ui_init();
+    pico05_status_init();
 
     // Lock out Core0 when BTstack performs flash writes on Core1.
     flash_safe_execute_core_init();
@@ -94,13 +95,14 @@ void usb_dev_main(void)
         tud_task();
         hid_task();
         pico_hat_ui_task();
+        pico05_status_task();
         pico_hat_event_log_task();
         led_blinking_task();
     }
 }
 
 //--------------------------------------------------------------------+
-// Local gate diagnostics
+// Local input logging
 //--------------------------------------------------------------------+
 void pico_hat_event_log_task(void)
 {
@@ -109,10 +111,10 @@ void pico_hat_event_log_task(void)
         return;
     }
 
-    pico_hat_diag_handle_event(&event);
-
-    // PICO-05 does not assign profile/remap semantics to HAT buttons. Local
-    // controls remain the validated PICO-03 hardware input baseline.
+    // PICO-05 does not assign profile/remap semantics to HAT buttons. The old
+    // PICO-03 colored marker renderer is deliberately not called here because
+    // the gate screen now owns the framebuffer using the black/white product
+    // accessibility baseline. KEY4 screen lock remains implemented in ui.c.
     printf("[PICO-05] %s %s lock=%u\r\n",
            pico_hat_ui_input_name(event.input),
            event.pressed ? "DOWN" : "UP",
