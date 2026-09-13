@@ -78,6 +78,7 @@ static bool g_pair_command_pending;
 static bool g_managed_connection;
 static bool g_managed_is_new_pair;
 static bool g_hids_transport_ready;
+static bool g_suppress_auto_reconnect_once;
 static after_disconnect_t g_after_disconnect;
 static le_device_addr_t g_pending_target;
 static uint8_t g_delete_addr_type;
@@ -232,7 +233,8 @@ static bool same_addr(uint8_t type_a, const uint8_t a[6],
     return type_a == type_b && memcmp(a, b, 6) == 0;
 }
 
-static void parse_advertised_name(const uint8_t *packet, char out[PICO07_DEVICE_NAME_MAX + 1u])
+static void parse_advertised_name(const uint8_t *packet,
+                                  char out[PICO07_DEVICE_NAME_MAX + 1u])
 {
     out[0] = '\0';
     const uint8_t *data = gap_event_advertising_report_get_data(packet);
@@ -314,12 +316,20 @@ bool pico07_pairing_scan_timeout_owned(void)
 
 bool pico07_pairing_connection_timeout_owned(void)
 {
-    if (!g_managed_connection) return false;
+    const bool was_managed = g_managed_connection;
     g_managed_connection = false;
     g_hids_transport_ready = false;
     app_state = W4_WORKING;
-    pair_publish_state(PICO07_PAIR_ERROR, "CONNECTION TIMEOUT");
-    hog_start_connect();
+
+    if (was_managed) {
+        pair_publish_state(PICO07_PAIR_ERROR, "CONNECTION TIMEOUT");
+        // A user-selected target failed. Restore the existing preferred mouse;
+        // if that peer is itself unavailable, its next timeout is unmanaged and
+        // stops cleanly instead of scanning/auto-pairing a random HID.
+        hog_start_connect();
+    } else {
+        pair_publish_state(PICO07_PAIR_ERROR, "DEVICE UNAVAILABLE");
+    }
     return true;
 }
 
@@ -344,11 +354,20 @@ void pico07_pairing_hids_transport_ready(void)
 
 bool pico07_pairing_handle_connection_error(void)
 {
-    if (!g_managed_connection) return false;
+    const bool was_managed = g_managed_connection;
     g_managed_connection = false;
     g_hids_transport_ready = false;
     app_state = W4_WORKING;
-    pair_publish_state(PICO07_PAIR_ERROR, "PAIRING FAILED");
+
+    if (was_managed) {
+        // The HCI disconnect event will restore the preferred mouse.
+        g_after_disconnect = AFTER_DISCONNECT_RESTORE_PRIMARY;
+        pair_publish_state(PICO07_PAIR_ERROR, "PAIRING FAILED");
+    } else {
+        // Never fall back to the legacy "scan first HID and connect" path.
+        g_suppress_auto_reconnect_once = true;
+        pair_publish_state(PICO07_PAIR_ERROR, "DEVICE UNAVAILABLE");
+    }
     return true;
 }
 
@@ -427,6 +446,11 @@ bool pico07_pairing_handle_disconnect(void)
             return true;
         case AFTER_DISCONNECT_NONE:
         default:
+            if (g_suppress_auto_reconnect_once) {
+                g_suppress_auto_reconnect_once = false;
+                app_state = W4_WORKING;
+                return true;
+            }
             return false;
     }
 }
@@ -552,8 +576,6 @@ static void classify_managed_connection_core1(void)
     const pico07_device_type_t type = type_from_capabilities(device.capabilities);
 
     if (type == PICO07_TYPE_UNSUPPORTED) {
-        // A newly paired unsupported HID (e.g. gamepad) is not retained as a
-        // supported product peer. Remove the bond/profile immediately.
         if (g_managed_is_new_pair) {
             (void)delete_saved_core1(device.identity_addr_type, device.identity_addr);
         }
@@ -577,8 +599,8 @@ static void classify_managed_connection_core1(void)
     }
 
     // Keyboard pairing is persisted now, but simultaneous keyboard forwarding
-    // belongs to PICO-08. For a *new* keyboard, restore the preferred mouse so
-    // PICO-07 pairing validation does not strand the remapper on the keyboard.
+    // belongs to PICO-08. A newly paired keyboard is disconnected after the
+    // bond/DeviceRecord is confirmed, then the preferred mouse is restored.
     pair_publish_result(type, g_managed_is_new_pair,
                         g_managed_is_new_pair ? "KEYBOARD SAVED" : "KEYBOARD CONNECTED");
     if (g_managed_is_new_pair) {
@@ -647,10 +669,12 @@ void ble_host_main(void)
     picow_bt_example_main();
 
     if (!g_pair_initialized) pico07_pairing_init();
+    device_profile_core1_prepare();
     g_pico07_attached_hids_cid = 0;
     g_pico07_profile_attached = false;
     g_managed_connection = false;
     g_hids_transport_ready = false;
+    g_suppress_auto_reconnect_once = false;
     g_after_disconnect = AFTER_DISCONNECT_NONE;
 
     btstack_run_loop_set_timer_handler(&g_pico07_profile_timer, pico07_profile_poll);
