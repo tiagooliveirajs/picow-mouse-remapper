@@ -86,6 +86,10 @@ typedef struct {
 
 void device_profile_init(void);
 
+// Core1-only startup hook. Loads/publishes the persistent device catalog even
+// when no BLE peer can connect, so Saved Devices remains usable offline.
+void device_profile_core1_prepare(void);
+
 // The connection handle is represented as its 16-bit wire/runtime value here
 // so this public header does not import BTstack HID types into TinyUSB code.
 void device_profile_on_hids_ready(uint16_t connection_handle,
