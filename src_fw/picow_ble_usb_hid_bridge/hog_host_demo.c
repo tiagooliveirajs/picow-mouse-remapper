@@ -21,7 +21,7 @@
  * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
  * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
  * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL BLUEKITCHEN
- * GMBH OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * GMBH AND CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
  * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
  * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
  * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
@@ -45,9 +45,13 @@
 #include "hog_host_demo.h"
 #include "picow_bt_example_common.h"
 #include "pico/cyw43_arch.h"
+#include "pico07_pairing.h"
 #include "Common.h"
 
-#define CONNECTION_TIMEOUT_MS 3000
+// Three seconds was marginal once PICO-07 started intentionally disconnecting
+// the active mouse before a user-selected pairing attempt. Give peripherals
+// enough time to wake/advertise/connect without changing the pairing timeout.
+#define CONNECTION_TIMEOUT_MS 8000
 #define SCAN_TIMEOUT_MS       5000
 
 #define TLV_TAG_HOGD ((((uint32_t) 'H') << 24 ) | (((uint32_t) 'O') << 16) | (((uint32_t) 'G') << 8) | 'D')
@@ -98,6 +102,11 @@ bool pico07_pairing_handle_disconnect(void);
 bool pico07_pairing_handle_connection_error(void);
 void pico07_pairing_hids_transport_ready(void);
 
+// hog_host_demo.c is textually included by hog_host_demo_poc.c. The state
+// publisher is defined later in that same translation unit, so it can also be
+// used by the Security Manager path to surface passkeys on the local LCD.
+static void pair_publish_state(pico07_pair_state_t state, const char *message);
+
 static void hog_start_scan(void);
 static void hog_start_connect(void);
 
@@ -144,8 +153,13 @@ static void hog_start_scan(void){
 static void hog_connection_timeout(btstack_timer_source_t * ts){
     UNUSED(ts);
     printf("Connection timeout.\n");
+    const bool managed = pico07_pairing_connection_is_managed();
     gap_connect_cancel();
-    if (pico07_pairing_connection_timeout_owned()) return;
+
+    // Only UI-owned attempts are terminal PICO-07 errors. Normal preferred
+    // reconnects retain the proven PICO-06 fallback: scan and reconnect a HID
+    // instead of getting stuck in DEVICE UNAVAILABLE after a short wake delay.
+    if (managed && pico07_pairing_connection_timeout_owned()) return;
     hog_start_scan();
 }
 
@@ -173,16 +187,20 @@ static void hog_start_connect(void){
             return;
         }
     }
-    // PICO-07 does not auto-pair with the first HID advertisement. With no
-    // preferred peer the UI remains usable and Pair New Device owns scanning.
+    // With no preferred peer, discovery is explicitly owned by Pair New Device.
     if (pico07_pairing_idle_without_saved_device()) return;
     hog_start_scan();
 }
 
 static void handle_outgoing_connection_error(void){
     printf("Outgoing connection/pairing error\n");
+    const bool managed = pico07_pairing_connection_is_managed();
     if (connection_handle != HCI_CON_HANDLE_INVALID) gap_disconnect(connection_handle);
-    if (pico07_pairing_handle_connection_error()) return;
+
+    // Keep PICO-07 errors local to explicit UI attempts. A normal reconnect
+    // falls back to the PICO-06 scan loop rather than becoming permanently
+    // unavailable after a transient HIDS/security failure.
+    if (managed && pico07_pairing_handle_connection_error()) return;
     hog_start_scan();
 }
 
@@ -307,22 +325,43 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel,
     switch (hci_event_packet_get_type(packet)) {
         case SM_EVENT_JUST_WORKS_REQUEST:
             printf("Just works requested\n");
+            pair_publish_state(PICO07_PAIR_CONNECTING, "CONFIRMING PAIRING");
             sm_just_works_confirm(sm_event_just_works_request_get_handle(packet));
             break;
-        case SM_EVENT_NUMERIC_COMPARISON_REQUEST:
-            printf("Confirming numeric comparison: %"PRIu32"\n",
-                   sm_event_numeric_comparison_request_get_passkey(packet));
+
+        case SM_EVENT_NUMERIC_COMPARISON_REQUEST: {
+            const uint32_t passkey =
+                sm_event_numeric_comparison_request_get_passkey(packet);
+            char message[21];
+            snprintf(message, sizeof(message), "VERIFY %06" PRIu32, passkey);
+            pair_publish_state(PICO07_PAIR_CONNECTING, message);
+            printf("Confirming numeric comparison: %06" PRIu32 "\n", passkey);
             sm_numeric_comparison_confirm(
-                sm_event_passkey_display_number_get_handle(packet));
+                sm_event_numeric_comparison_request_get_handle(packet));
             break;
-        case SM_EVENT_PASSKEY_DISPLAY_NUMBER:
-            printf("Display Passkey: %"PRIu32"\n",
-                   sm_event_passkey_display_number_get_passkey(packet));
+        }
+
+        case SM_EVENT_PASSKEY_DISPLAY_NUMBER: {
+            const uint32_t passkey =
+                sm_event_passkey_display_number_get_passkey(packet);
+            char message[21];
+            // Exactly 20 visible characters for a six-digit passkey. It fits
+            // the current screen and remains intact after UI_TEXT_MAX -> 21.
+            snprintf(message, sizeof(message), "TYPE %06" PRIu32 " ON KEYBD", passkey);
+            pair_publish_state(PICO07_PAIR_CONNECTING, message);
+            printf("Display Passkey: %06" PRIu32 "\n", passkey);
             break;
+        }
+
+        case SM_EVENT_PASSKEY_DISPLAY_CANCEL:
+            pair_publish_state(PICO07_PAIR_CONNECTING, "PAIRING CONTINUES");
+            break;
+
         case SM_EVENT_PAIRING_COMPLETE:
             switch (sm_event_pairing_complete_get_status(packet)){
                 case ERROR_CODE_SUCCESS:
                     printf("Pairing complete, success\n");
+                    pair_publish_state(PICO07_PAIR_CONNECTING, "PAIRING COMPLETE");
                     connect_to_service = true;
                     break;
                 case ERROR_CODE_CONNECTION_TIMEOUT:
@@ -330,16 +369,44 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel,
                     handle_outgoing_connection_error();
                     break;
                 default:
-                    printf("Pairing failed, status 0x%02x\n",
-                           sm_event_pairing_complete_get_status(packet));
+                    printf("Pairing failed, status 0x%02x reason 0x%02x\n",
+                           sm_event_pairing_complete_get_status(packet),
+                           sm_event_pairing_complete_get_reason(packet));
                     handle_outgoing_connection_error();
                     break;
             }
             break;
-        case SM_EVENT_REENCRYPTION_COMPLETE:
-            printf("Re-encryption complete, success\n");
-            connect_to_service = true;
+
+        case SM_EVENT_REENCRYPTION_COMPLETE: {
+            const uint8_t status = sm_event_reencryption_complete_get_status(packet);
+            if (status == ERROR_CODE_SUCCESS) {
+                printf("Re-encryption complete, success\n");
+                pair_publish_state(PICO07_PAIR_CONNECTING, "BOND RESTORED");
+                connect_to_service = true;
+                break;
+            }
+
+            if (status == ERROR_CODE_PIN_OR_KEY_MISSING) {
+                // BTstack's documented recovery for a peer that lost its side
+                // of a bond: remove the stale local bond and start fresh pairing
+                // on the current connection. This is important for mice/keyboards
+                // that were factory-reset or re-paired elsewhere.
+                bd_addr_t addr;
+                sm_event_reencryption_complete_get_address(packet, addr);
+                const bd_addr_type_t addr_type =
+                    (bd_addr_type_t)sm_event_reencryption_complete_get_addr_type(packet);
+                printf("Re-encryption failed: peer lost bond, resetting local bond\n");
+                gap_delete_bonding(addr_type, addr);
+                pair_publish_state(PICO07_PAIR_CONNECTING, "BOND RESET - PAIRING");
+                sm_request_pairing(sm_event_reencryption_complete_get_handle(packet));
+                break;
+            }
+
+            printf("Re-encryption failed, status 0x%02x\n", status);
+            handle_outgoing_connection_error();
             break;
+        }
+
         default:
             break;
     }
