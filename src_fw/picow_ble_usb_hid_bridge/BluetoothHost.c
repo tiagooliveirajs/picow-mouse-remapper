@@ -166,10 +166,10 @@ bool BT_HOST_StartDiscovery(void)
 
 bt_host_pairing_info_t BT_HOST_GetPairingInfo(void)
 {
-    bt_host_pairing_info_t info = {0};
 #if APP_BT_DEFAULT_CLASSIC
     return CLASSIC_HID_GetPairingInfo();
 #else
+    bt_host_pairing_info_t info = {0};
     return info;
 #endif
 }
