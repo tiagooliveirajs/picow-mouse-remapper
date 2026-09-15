@@ -164,6 +164,37 @@ bool BT_HOST_StartDiscovery(void)
 #endif
 }
 
+bool BT_HOST_GetRememberedDevice(bt_host_device_t *out_device)
+{
+#if APP_BT_DEFAULT_CLASSIC
+    return CLASSIC_HID_GetRememberedDevice(out_device);
+#else
+    if (out_device != NULL) {
+        memset(out_device, 0, sizeof(*out_device));
+    }
+    return false;
+#endif
+}
+
+bt_host_reconnect_info_t BT_HOST_GetReconnectInfo(void)
+{
+#if APP_BT_DEFAULT_CLASSIC
+    return CLASSIC_HID_GetReconnectInfo();
+#else
+    bt_host_reconnect_info_t info = {0};
+    return info;
+#endif
+}
+
+bool BT_HOST_ForgetRememberedDevice(void)
+{
+#if APP_BT_DEFAULT_CLASSIC
+    return CLASSIC_HID_ForgetRememberedDevice();
+#else
+    return false;
+#endif
+}
+
 bt_host_pairing_info_t BT_HOST_GetPairingInfo(void)
 {
 #if APP_BT_DEFAULT_CLASSIC

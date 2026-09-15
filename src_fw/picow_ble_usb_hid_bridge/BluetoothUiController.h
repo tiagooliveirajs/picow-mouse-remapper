@@ -13,6 +13,7 @@ typedef enum {
     BT_UI_ACTION_CONFIRM,
     BT_UI_ACTION_CANCEL,
     BT_UI_ACTION_RESCAN,
+    BT_UI_ACTION_FORGET,
 } bt_ui_action_t;
 
 typedef struct {
@@ -25,6 +26,10 @@ typedef struct {
     int selected_index;
     bool has_selected_device;
     bt_host_device_t selected_device;
+
+    bool has_remembered_device;
+    bt_host_device_t remembered_device;
+    bt_host_reconnect_info_t reconnect;
 
     bt_host_pairing_info_t pairing;
 } bt_ui_snapshot_t;

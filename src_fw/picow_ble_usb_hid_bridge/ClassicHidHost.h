@@ -29,6 +29,10 @@ bool CLASSIC_HID_SelectPreviousDevice(void);
 bool CLASSIC_HID_ConfirmSelectedDevice(void);
 bool CLASSIC_HID_StartDiscovery(void);
 
+bool CLASSIC_HID_GetRememberedDevice(bt_host_device_t *out_device);
+bt_host_reconnect_info_t CLASSIC_HID_GetReconnectInfo(void);
+bool CLASSIC_HID_ForgetRememberedDevice(void);
+
 bt_host_pairing_info_t CLASSIC_HID_GetPairingInfo(void);
 bool CLASSIC_HID_ConfirmPairing(bool accept);
 bool CLASSIC_HID_SubmitPasskey(uint32_t passkey);

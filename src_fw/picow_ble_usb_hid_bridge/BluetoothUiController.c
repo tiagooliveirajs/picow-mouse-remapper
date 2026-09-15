@@ -17,6 +17,9 @@ void BT_UI_GetSnapshot(bt_ui_snapshot_t *out_snapshot)
     out_snapshot->device_count = BT_HOST_GetDiscoveredDeviceCount();
     out_snapshot->selected_index = BT_HOST_GetSelectedDeviceIndex();
     out_snapshot->pairing = BT_HOST_GetPairingInfo();
+    out_snapshot->reconnect = BT_HOST_GetReconnectInfo();
+    out_snapshot->has_remembered_device = BT_HOST_GetRememberedDevice(
+        &out_snapshot->remembered_device);
 
     (void)snprintf(out_snapshot->state_text,
                    sizeof(out_snapshot->state_text),
@@ -69,10 +72,16 @@ bool BT_UI_HandleAction(bt_ui_action_t action)
                     return BT_HOST_ConfirmPairing(false);
                 }
             }
+            if (state == BT_HOST_STATE_RECONNECTING) {
+                return BT_HOST_StartDiscovery();
+            }
             return false;
 
         case BT_UI_ACTION_RESCAN:
             return BT_HOST_StartDiscovery();
+
+        case BT_UI_ACTION_FORGET:
+            return BT_HOST_ForgetRememberedDevice();
 
         default:
             return false;

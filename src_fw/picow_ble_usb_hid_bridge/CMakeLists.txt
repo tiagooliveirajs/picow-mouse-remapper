@@ -44,10 +44,11 @@ add_executable(picow_ble_usb_hid_bridge
     AppLog.c
     BluetoothHost.c
     BluetoothUiController.c
+    BluetoothPersistence.c
     ClassicHidHost.c
 
     # Existing BLE HOG implementation remains compiled. BluetoothHost selects
-    # Classic HID for G03 while keeping the USB/application side transport-neutral.
+    # Classic HID while keeping the USB/application side transport-neutral.
     hog_host_demo.c
     picow_bt_example_common.c
 )
@@ -71,8 +72,8 @@ target_include_directories(picow_ble_usb_hid_bridge PRIVATE
 
 target_compile_definitions(picow_ble_usb_hid_bridge PRIVATE
     CYW43_LWIP=0
-    APP_FIRMWARE_VERSION="0.3.0-g03"
-    APP_GATE_NAME="G03"
+    APP_FIRMWARE_VERSION="0.4.0-g04"
+    APP_GATE_NAME="G04"
     APP_BT_DEFAULT_CLASSIC=1
 )
 
