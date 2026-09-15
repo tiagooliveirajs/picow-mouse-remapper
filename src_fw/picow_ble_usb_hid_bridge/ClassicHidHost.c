@@ -596,15 +596,16 @@ static void classic_hid_packet_handler(uint8_t packet_type,
             switch (hci_event_hid_meta_get_subevent_code(packet)) {
                 case HID_SUBEVENT_INCOMING_CONNECTION: {
                     const uint16_t incoming_cid = hid_subevent_incoming_connection_get_hid_cid(packet);
-                    const uint8_t status = hid_subevent_incoming_connection_get_status(packet);
-                    if (status != ERROR_CODE_SUCCESS) {
-                        break;
-                    }
+                    bd_addr_t incoming_addr;
+                    hid_subevent_incoming_connection_get_address(packet, incoming_addr);
 
-                    // G03 requires an explicit selected device. Only accept an
-                    // incoming HID connection while that selection is being
-                    // connected/paired; otherwise decline it.
-                    if (s_state == BT_HOST_STATE_CONNECTING || s_state == BT_HOST_STATE_PAIRING) {
+                    // Only the device explicitly selected by the UI may open an
+                    // incoming HID channel while its connection/pairing is active.
+                    const bool selected_device_matches =
+                        bd_addr_cmp(incoming_addr, s_target_addr) == 0;
+                    if ((s_state == BT_HOST_STATE_CONNECTING ||
+                         s_state == BT_HOST_STATE_PAIRING) &&
+                        selected_device_matches) {
                         s_hid_host_cid = incoming_cid;
                         (void)hid_host_accept_connection(incoming_cid, HID_PROTOCOL_MODE_REPORT);
                     } else {
@@ -856,17 +857,25 @@ bt_host_pairing_info_t CLASSIC_HID_GetPairingInfo(void)
 
 bool CLASSIC_HID_ConfirmPairing(bool accept)
 {
-    if (s_state != BT_HOST_STATE_PAIRING ||
-        !s_pairing_info.action_required ||
-        (s_pairing_info.method != BT_HOST_PAIRING_LEGACY_PIN &&
-         s_pairing_info.method != BT_HOST_PAIRING_NUMERIC_CONFIRMATION &&
-         s_pairing_info.method != BT_HOST_PAIRING_PASSKEY_INPUT)) {
+    if (s_state != BT_HOST_STATE_PAIRING || !s_pairing_info.action_required) {
         return false;
     }
 
-    return classic_hid_queue_command(
-        accept ? CLASSIC_COMMAND_PAIRING_ACCEPT : CLASSIC_COMMAND_PAIRING_REJECT,
-        0);
+    if (!accept) {
+        if (s_pairing_info.method != BT_HOST_PAIRING_LEGACY_PIN &&
+            s_pairing_info.method != BT_HOST_PAIRING_NUMERIC_CONFIRMATION &&
+            s_pairing_info.method != BT_HOST_PAIRING_PASSKEY_INPUT) {
+            return false;
+        }
+        return classic_hid_queue_command(CLASSIC_COMMAND_PAIRING_REJECT, 0);
+    }
+
+    // PASSKEY_INPUT is completed only through CLASSIC_HID_SubmitPasskey().
+    if (s_pairing_info.method != BT_HOST_PAIRING_LEGACY_PIN &&
+        s_pairing_info.method != BT_HOST_PAIRING_NUMERIC_CONFIRMATION) {
+        return false;
+    }
+    return classic_hid_queue_command(CLASSIC_COMMAND_PAIRING_ACCEPT, 0);
 }
 
 bool CLASSIC_HID_SubmitPasskey(uint32_t passkey)
