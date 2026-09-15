@@ -12,6 +12,7 @@
 
 typedef enum {
     BT_HOST_STATE_BOOTING = 0,
+    BT_HOST_STATE_RECONNECTING,
     BT_HOST_STATE_DISCOVERING,
     BT_HOST_STATE_RESOLVING_NAMES,
     BT_HOST_STATE_DEVICE_SELECTION,
@@ -54,5 +55,12 @@ typedef struct {
     char legacy_pin[BT_HOST_LEGACY_PIN_MAX];
     bool action_required;
 } bt_host_pairing_info_t;
+
+typedef struct {
+    bool active;
+    uint8_t attempt;
+    uint8_t max_attempts;
+    uint32_t retry_delay_ms;
+} bt_host_reconnect_info_t;
 
 #endif
