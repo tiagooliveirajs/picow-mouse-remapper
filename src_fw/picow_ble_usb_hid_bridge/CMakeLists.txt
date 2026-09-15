@@ -1,15 +1,9 @@
-# Generated Cmake Pico project file
-
 cmake_minimum_required(VERSION 3.13)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Initialise pico_sdk from installed location
-# (note this can come from environment, CMake cache etc)
-
-# == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
 if(WIN32)
     set(USERHOME $ENV{USERPROFILE})
 else()
@@ -22,32 +16,43 @@ set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
 if (EXISTS ${picoVscode})
     include(${picoVscode})
 endif()
-# ====================================================================================
-set(PICO_BOARD pico_w CACHE STRING "Board type")
 
-# Pull in Raspberry Pi Pico SDK (must be before project)
+# The Classic HID POC was physically validated on the project's RP2350 board.
+# Keep the production firmware on the same target to avoid generating an RP2040
+# image that can be flashed accidentally to the Pico 2 W.
+set(PICO_BOARD pico2_w CACHE STRING "Board type")
+if(NOT PICO_BOARD STREQUAL "pico2_w")
+    message(FATAL_ERROR
+        "The remapper firmware currently targets Raspberry Pi Pico 2 W (RP2350). "
+        "Use -DPICO_BOARD=pico2_w (got '${PICO_BOARD}').")
+endif()
+
 include(pico_sdk_import.cmake)
 
 project(picow_ble_usb_hid_bridge C CXX ASM)
-
-# Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
-add_compile_options(-Wall
-        -Wno-format          # int != int32_t as far as the compiler is concerned because gcc has int32_t as long int
-        -Wno-unused-function # we have some for the docs that aren't called
-        -Wno-maybe-uninitialized
-        )
+add_compile_options(
+    -Wall
+    -Wno-format
+    -Wno-unused-function
+    -Wno-maybe-uninitialized
+)
 
-# Add executable.
 add_executable(picow_ble_usb_hid_bridge
     main.c
     usb_descriptors.c
-    hog_host_demo.c
-    picow_bt_example_common.c
     Common.c
     AppLog.c
-    )
+    BluetoothHost.c
+    ClassicHidHost.c
+
+    # Existing BLE HOG implementation is intentionally retained and compiled.
+    # BluetoothHost selects Classic HID for G02; a later UI gate can select the
+    # transport without re-coupling USB code to either implementation.
+    hog_host_demo.c
+    picow_bt_example_common.c
+)
 
 target_link_libraries(picow_ble_usb_hid_bridge
     pico_stdlib
@@ -60,26 +65,26 @@ target_link_libraries(picow_ble_usb_hid_bridge
     pico_btstack_classic
     pico_btstack_cyw43
     pico_cyw43_arch_threadsafe_background
-    )
+)
 
 target_include_directories(picow_ble_usb_hid_bridge PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
-    )
+)
 
 target_compile_definitions(picow_ble_usb_hid_bridge PRIVATE
     CYW43_LWIP=0
-    APP_FIRMWARE_VERSION="0.1.0-g01"
-    )
+    APP_FIRMWARE_VERSION="0.2.0-g02"
+    APP_GATE_NAME="G02"
+    APP_BT_DEFAULT_CLASSIC=1
+)
 
 pico_btstack_make_gatt_header(picow_ble_usb_hid_bridge PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/hog_host_demo.gatt
-    )
+)
 
-# Keep Pico SDK USB stdio disabled because the application owns the native USB
-# controller through TinyUSB. A TinyUSB CDC interface provides /dev/ttyACM*
-# diagnostics, while UART remains enabled as a fallback debug channel.
+# TinyUSB owns native USB. CDC diagnostics remain available as part of the
+# composite TinyUSB device; UART is kept only as a fallback debug channel.
 pico_enable_stdio_usb(picow_ble_usb_hid_bridge 0)
 pico_enable_stdio_uart(picow_ble_usb_hid_bridge 1)
 
-# create map/bin/hex/uf2 file etc.
 pico_add_extra_outputs(picow_ble_usb_hid_bridge)
