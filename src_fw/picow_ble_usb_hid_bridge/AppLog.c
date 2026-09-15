@@ -13,14 +13,16 @@
 #define APP_FIRMWARE_VERSION "dev"
 #endif
 
+#ifndef APP_GATE_NAME
+#define APP_GATE_NAME "DEV"
+#endif
+
 #define APP_LOG_LINE_MAX 256
 #define APP_LOG_CDC_RX_SCRATCH 64
 
 static void app_log_write_cdc_line(const char *line)
 {
-    // The TinyUSB device stack is serviced by Core 0. Avoid accessing it from
-    // Core 1 so future Bluetooth-side logging cannot accidentally introduce a
-    // cross-core TinyUSB race.
+    // TinyUSB is serviced by Core 0. Never access it from the Bluetooth core.
     if (get_core_num() != 0) {
         return;
     }
@@ -55,16 +57,14 @@ void APP_LOG_Info(const char *format, ...)
     (void)snprintf(
         line,
         sizeof(line),
-        "[%010lu ms][G01][C%u] %s",
+        "[%010lu ms][%s][C%u] %s",
         (unsigned long)now_ms,
+        APP_GATE_NAME,
         core,
         message);
 
-    // UART stdio is kept as a hardware/debug fallback.
+    // UART remains a fallback. CDC is intentionally serviced only on Core 0.
     printf("%s\n", line);
-
-    // CDC is the primary host-visible diagnostic channel and appears as
-    // /dev/ttyACM* on Linux.
     app_log_write_cdc_line(line);
 }
 
@@ -74,8 +74,6 @@ void APP_LOG_Task(void)
         return;
     }
 
-    // Gate 01 exposes a read-only diagnostic console. Discard any accidental
-    // host input so the CDC RX buffer cannot remain permanently full.
     uint8_t scratch[APP_LOG_CDC_RX_SCRATCH];
     while (tud_cdc_available()) {
         const uint32_t available = tud_cdc_available();
@@ -88,14 +86,11 @@ void APP_LOG_Task(void)
 
 void APP_LOG_PrintBootBanner(void)
 {
-    APP_LOG_Info("Pico W HID Remapper firmware %s", APP_FIRMWARE_VERSION);
-    APP_LOG_Info("Gate 01 base firmware diagnostics are active");
-    APP_LOG_Info("USB interfaces: HID + CDC diagnostics; UART fallback enabled");
+    APP_LOG_Info("Pico 2 W HID Remapper firmware %s", APP_FIRMWARE_VERSION);
+    APP_LOG_Info("Bluetooth Classic HID integration active");
+    APP_LOG_Info("USB interfaces: HID + CDC diagnostics");
 }
 
-// TinyUSB CDC callback. Opening /dev/ttyACM* normally asserts DTR, so printing
-// the banner here guarantees a useful message even if the terminal is opened
-// after the firmware has already booted.
 void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
 {
     (void)rts;
