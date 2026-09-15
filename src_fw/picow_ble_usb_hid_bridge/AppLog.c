@@ -63,7 +63,6 @@ void APP_LOG_Info(const char *format, ...)
         core,
         message);
 
-    // UART remains a fallback. CDC is intentionally serviced only on Core 0.
     printf("%s\n", line);
     app_log_write_cdc_line(line);
 }
@@ -87,8 +86,8 @@ void APP_LOG_Task(void)
 void APP_LOG_PrintBootBanner(void)
 {
     APP_LOG_Info("Pico 2 W HID Remapper firmware %s", APP_FIRMWARE_VERSION);
-    APP_LOG_Info("Bluetooth Classic HID integration active");
-    APP_LOG_Info("USB interfaces: HID + CDC diagnostics");
+    APP_LOG_Info("Generic Classic HID discovery/selection backend active");
+    APP_LOG_Info("Pairing state is exposed for the future LCD/HAT GUI");
 }
 
 void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
