@@ -43,6 +43,7 @@ add_executable(picow_ble_usb_hid_bridge
     Common.c
     AppLog.c
     BluetoothHost.c
+    BluetoothUiController.c
     ClassicHidHost.c
 
     # Existing BLE HOG implementation remains compiled. BluetoothHost selects
