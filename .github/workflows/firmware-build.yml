@@ -1,0 +1,69 @@
+name: Firmware Build
+
+on:
+  push:
+    branches:
+      - main
+      - 'gate/**'
+    paths:
+      - 'src_fw/**'
+      - '.github/workflows/firmware-build.yml'
+  pull_request:
+    paths:
+      - 'src_fw/**'
+      - '.github/workflows/firmware-build.yml'
+
+jobs:
+  build-pico-w:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            gcc-arm-none-eabi \
+            libnewlib-arm-none-eabi
+
+      - name: Fetch Pico SDK 2.2.0
+        run: |
+          git clone \
+            --branch 2.2.0 \
+            --depth 1 \
+            --recurse-submodules \
+            --shallow-submodules \
+            https://github.com/raspberrypi/pico-sdk.git \
+            .pico-sdk
+
+      - name: Configure firmware
+        env:
+          PICO_SDK_PATH: ${{ github.workspace }}/.pico-sdk
+        run: |
+          cmake \
+            -S src_fw/picow_ble_usb_hid_bridge \
+            -B build/firmware \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build firmware
+        run: cmake --build build/firmware --parallel 2
+
+      - name: Verify UF2 output
+        run: test -f build/firmware/picow_ble_usb_hid_bridge.uf2
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: picow-ble-usb-hid-bridge
+          path: |
+            build/firmware/picow_ble_usb_hid_bridge.uf2
+            build/firmware/picow_ble_usb_hid_bridge.elf
+            build/firmware/picow_ble_usb_hid_bridge.map
+          if-no-files-found: error
