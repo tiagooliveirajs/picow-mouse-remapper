@@ -10,6 +10,7 @@
 #include "pico/cyw43_arch.h"
 #include "pico/stdlib.h"
 
+#include "BluetoothPersistence.h"
 #include "Common.h"
 
 #define CLASSIC_HID_INQUIRY_DURATION_1280MS 5
@@ -18,7 +19,9 @@
 #define CLASSIC_HID_COD_MAJOR_MASK 0x1F00u
 #define CLASSIC_HID_COD_MAJOR_PERIPHERAL 0x0500u
 #define CLASSIC_HID_RSSI_UNKNOWN INT8_MIN
+#define CLASSIC_HID_RECONNECT_MAX_ATTEMPTS 4u
 
+static const uint32_t s_reconnect_backoff_ms[] = {1000u, 2000u, 4000u};
 static const char s_legacy_pin[] = "0000";
 
 typedef enum {
@@ -42,6 +45,7 @@ typedef enum {
     CLASSIC_COMMAND_PAIRING_ACCEPT,
     CLASSIC_COMMAND_PAIRING_REJECT,
     CLASSIC_COMMAND_SUBMIT_PASSKEY,
+    CLASSIC_COMMAND_FORGET_DEVICE,
 } classic_command_t;
 
 static volatile bt_host_state_t s_state = BT_HOST_STATE_BOOTING;
@@ -50,10 +54,19 @@ static volatile size_t s_device_count;
 static volatile int s_selected_index = -1;
 
 static bd_addr_t s_target_addr;
+static bt_host_device_t s_target_info;
+static volatile bool s_target_info_valid;
 static volatile uint16_t s_hid_host_cid;
 static volatile bool s_descriptor_available;
 static char s_device_name[BT_HOST_DEVICE_NAME_MAX];
 static uint8_t s_hid_descriptor_storage[CLASSIC_HID_DESCRIPTOR_STORAGE_SIZE];
+
+static bt_persisted_hid_device_t s_remembered_device;
+static volatile bool s_has_remembered_device;
+static volatile bool s_auto_reconnect_active;
+static volatile uint8_t s_reconnect_attempt;
+static volatile uint32_t s_reconnect_retry_delay_ms;
+static volatile bool s_reconnect_timer_scheduled;
 
 static bt_host_pairing_info_t s_pairing_info;
 static bd_addr_t s_pairing_addr;
@@ -64,6 +77,7 @@ static volatile bool s_pairing_addr_valid;
 static volatile classic_command_t s_pending_command = CLASSIC_COMMAND_NONE;
 static volatile uint32_t s_pending_command_arg;
 static btstack_timer_source_t s_command_timer;
+static btstack_timer_source_t s_reconnect_timer;
 
 static btstack_packet_callback_registration_t s_hci_event_callback_registration;
 
@@ -73,6 +87,9 @@ static void classic_hid_start_inquiry_on_core1(void);
 static void classic_hid_request_next_remote_name(void);
 static void classic_hid_finish_discovery(void);
 static void classic_hid_connect_selected_on_core1(void);
+static void classic_hid_begin_auto_reconnect_on_core1(void);
+static void classic_hid_attempt_reconnect_on_core1(void);
+static void classic_hid_schedule_reconnect_retry_on_core1(void);
 
 static bool classic_hid_contains_case_insensitive(const char *text, const char *token)
 {
@@ -201,6 +218,119 @@ static bool classic_hid_queue_command(classic_command_t command, uint32_t arg)
     return true;
 }
 
+static void classic_hid_publish_remembered(const bt_persisted_hid_device_t *device)
+{
+    s_has_remembered_device = false;
+    if (device == NULL) {
+        memset(&s_remembered_device, 0, sizeof(s_remembered_device));
+        return;
+    }
+
+    s_remembered_device = *device;
+    s_has_remembered_device = true;
+}
+
+static void classic_hid_cancel_reconnect_timer(void)
+{
+    if (s_reconnect_timer_scheduled) {
+        (void)btstack_run_loop_remove_timer(&s_reconnect_timer);
+        s_reconnect_timer_scheduled = false;
+    }
+    s_reconnect_retry_delay_ms = 0;
+}
+
+static void classic_hid_set_target_from_remembered(void)
+{
+    memcpy(s_target_addr, s_remembered_device.address, sizeof(bd_addr_t));
+    memset(&s_target_info, 0, sizeof(s_target_info));
+    s_target_info.class_of_device = s_remembered_device.class_of_device;
+    s_target_info.kind = s_remembered_device.kind;
+    s_target_info.hid_candidate = true;
+    s_target_info.name_resolved = s_remembered_device.name[0] != '\0';
+    s_target_info.rssi = CLASSIC_HID_RSSI_UNKNOWN;
+    (void)snprintf(s_target_info.address,
+                   sizeof(s_target_info.address),
+                   "%s",
+                   bd_addr_to_str(s_target_addr));
+    if (s_remembered_device.name[0] != '\0') {
+        (void)snprintf(s_target_info.name,
+                       sizeof(s_target_info.name),
+                       "%s",
+                       s_remembered_device.name);
+        (void)snprintf(s_device_name,
+                       sizeof(s_device_name),
+                       "%s",
+                       s_remembered_device.name);
+    } else {
+        (void)snprintf(s_device_name,
+                       sizeof(s_device_name),
+                       "%s",
+                       s_target_info.address);
+    }
+    s_target_info_valid = true;
+}
+
+static bool classic_hid_target_matches_remembered(void)
+{
+    return s_has_remembered_device &&
+           bd_addr_cmp(s_target_addr, s_remembered_device.address) == 0;
+}
+
+static void classic_hid_load_remembered_on_core1(void)
+{
+    bt_persisted_hid_device_t device;
+    if (!BT_PERSISTENCE_LoadHidDevice(&device)) {
+        classic_hid_publish_remembered(NULL);
+        printf("[G04][ClassicHID] no remembered HID target in TLV\n");
+        return;
+    }
+
+    classic_hid_publish_remembered(&device);
+    printf("[G04][ClassicHID] remembered HID target loaded: %s (%s)\n",
+           device.name[0] != '\0' ? device.name : "unnamed",
+           bd_addr_to_str(device.address));
+}
+
+static void classic_hid_persist_target_on_core1(void)
+{
+    if (!s_target_info_valid) {
+        return;
+    }
+
+    bt_persisted_hid_device_t device;
+    memset(&device, 0, sizeof(device));
+    memcpy(device.address, s_target_addr, sizeof(device.address));
+    device.class_of_device = s_target_info.class_of_device;
+    device.kind = s_target_info.kind;
+    (void)snprintf(device.name, sizeof(device.name), "%s", s_target_info.name);
+
+    if (BT_PERSISTENCE_StoreHidDevice(&device)) {
+        classic_hid_publish_remembered(&device);
+        printf("[G04][ClassicHID] remembered HID target persisted: %s (%s)\n",
+               device.name[0] != '\0' ? device.name : "unnamed",
+               bd_addr_to_str(device.address));
+    } else {
+        printf("[G04][ClassicHID] failed to persist remembered HID target\n");
+    }
+}
+
+static void classic_hid_forget_remembered_on_core1(void)
+{
+    s_auto_reconnect_active = false;
+    classic_hid_cancel_reconnect_timer();
+
+    if (BT_PERSISTENCE_ClearHidDevice()) {
+        printf("[G04][ClassicHID] remembered HID target cleared\n");
+    } else {
+        printf("[G04][ClassicHID] failed to clear remembered HID target\n");
+    }
+    classic_hid_publish_remembered(NULL);
+
+    if (s_state == BT_HOST_STATE_RECONNECTING) {
+        classic_hid_start_inquiry_on_core1();
+    }
+}
+
 static void classic_hid_select_first_candidate(void)
 {
     s_selected_index = -1;
@@ -218,26 +348,44 @@ static void classic_hid_finish_discovery(void)
     classic_hid_select_first_candidate();
     s_state = BT_HOST_STATE_DEVICE_SELECTION;
 
-    printf("[G03][ClassicHID] discovery complete: %u device(s), selected=%d\n",
+    printf("[G04][ClassicHID] discovery complete: %u device(s), selected=%d\n",
            (unsigned int)s_device_count,
            (int)s_selected_index);
 }
 
 static void classic_hid_start_inquiry_on_core1(void)
 {
+    const bool had_descriptor = s_descriptor_available;
+    const uint16_t previous_cid = (uint16_t)s_hid_host_cid;
+
+    s_auto_reconnect_active = false;
+    s_reconnect_attempt = 0;
+    classic_hid_cancel_reconnect_timer();
+    gap_inquiry_stop();
+
+    if (previous_cid != 0) {
+        hid_host_disconnect(previous_cid);
+    }
+
     memset(s_devices, 0, sizeof(s_devices));
     s_device_count = 0;
     s_selected_index = -1;
     s_device_name[0] = '\0';
+    s_target_info_valid = false;
+    memset(&s_target_info, 0, sizeof(s_target_info));
+    memset(s_target_addr, 0, sizeof(s_target_addr));
     classic_hid_clear_connection_state();
+    if (had_descriptor) {
+        g_usb_reinit_request = true;
+    }
     s_state = BT_HOST_STATE_DISCOVERING;
 
-    printf("[G03][ClassicHID] starting generic Bluetooth Classic discovery\n");
+    printf("[G04][ClassicHID] starting generic Bluetooth Classic discovery\n");
 
     const int status = gap_inquiry_start(CLASSIC_HID_INQUIRY_DURATION_1280MS);
     if (status != ERROR_CODE_SUCCESS) {
         s_state = BT_HOST_STATE_ERROR;
-        printf("[G03][ClassicHID] gap_inquiry_start failed: 0x%02x\n", status);
+        printf("[G04][ClassicHID] gap_inquiry_start failed: 0x%02x\n", status);
     }
 }
 
@@ -368,7 +516,13 @@ static void classic_hid_connect_selected_on_core1(void)
     }
 
     discovered_device_t *device = &s_devices[selected];
+    s_auto_reconnect_active = false;
+    s_reconnect_attempt = 0;
+    classic_hid_cancel_reconnect_timer();
+
     memcpy(s_target_addr, device->address, sizeof(bd_addr_t));
+    s_target_info = device->info;
+    s_target_info_valid = true;
     if (device->info.name[0] != '\0') {
         (void)snprintf(s_device_name, sizeof(s_device_name), "%s", device->info.name);
     } else {
@@ -379,14 +533,14 @@ static void classic_hid_connect_selected_on_core1(void)
     s_state = BT_HOST_STATE_CONNECTING;
     gap_inquiry_stop();
 
-    printf("[G03][ClassicHID] connecting to selected HID candidate %s (%s)\n",
+    printf("[G04][ClassicHID] connecting to selected HID candidate %s (%s)\n",
            device->info.address,
            s_device_name);
 
     uint16_t new_cid = 0;
     const uint8_t status = hid_host_connect(s_target_addr, HID_PROTOCOL_MODE_REPORT, &new_cid);
     if (status != ERROR_CODE_SUCCESS) {
-        printf("[G03][ClassicHID] hid_host_connect failed: 0x%02x\n", status);
+        printf("[G04][ClassicHID] hid_host_connect failed: 0x%02x\n", status);
         s_state = BT_HOST_STATE_ERROR;
         return;
     }
@@ -394,11 +548,90 @@ static void classic_hid_connect_selected_on_core1(void)
     s_hid_host_cid = new_cid;
 }
 
+static void classic_hid_schedule_reconnect_retry_on_core1(void)
+{
+    classic_hid_clear_connection_state();
+
+    if (!s_auto_reconnect_active || !s_has_remembered_device) {
+        s_state = BT_HOST_STATE_ERROR;
+        return;
+    }
+
+    if (s_reconnect_attempt >= CLASSIC_HID_RECONNECT_MAX_ATTEMPTS) {
+        printf("[G04][ClassicHID] reconnect attempts exhausted; falling back to discovery\n");
+        s_auto_reconnect_active = false;
+        s_reconnect_attempt = 0;
+        classic_hid_cancel_reconnect_timer();
+        classic_hid_start_inquiry_on_core1();
+        return;
+    }
+
+    const size_t backoff_index = (size_t)(s_reconnect_attempt - 1u);
+    const uint32_t delay_ms = s_reconnect_backoff_ms[backoff_index];
+    s_reconnect_retry_delay_ms = delay_ms;
+    s_state = BT_HOST_STATE_RECONNECTING;
+
+    classic_hid_cancel_reconnect_timer();
+    s_reconnect_retry_delay_ms = delay_ms;
+    btstack_run_loop_set_timer(&s_reconnect_timer, delay_ms);
+    btstack_run_loop_add_timer(&s_reconnect_timer);
+    s_reconnect_timer_scheduled = true;
+
+    printf("[G04][ClassicHID] reconnect retry scheduled in %" PRIu32 " ms\n", delay_ms);
+}
+
+static void classic_hid_attempt_reconnect_on_core1(void)
+{
+    if (!s_auto_reconnect_active || !s_has_remembered_device) {
+        classic_hid_start_inquiry_on_core1();
+        return;
+    }
+
+    classic_hid_cancel_reconnect_timer();
+    classic_hid_set_target_from_remembered();
+    classic_hid_clear_connection_state();
+    s_state = BT_HOST_STATE_RECONNECTING;
+    ++s_reconnect_attempt;
+
+    printf("[G04][ClassicHID] auto-reconnect attempt %u/%u to %s (%s)\n",
+           (unsigned int)s_reconnect_attempt,
+           (unsigned int)CLASSIC_HID_RECONNECT_MAX_ATTEMPTS,
+           s_device_name,
+           bd_addr_to_str(s_target_addr));
+
+    uint16_t new_cid = 0;
+    const uint8_t status = hid_host_connect(s_target_addr, HID_PROTOCOL_MODE_REPORT, &new_cid);
+    if (status != ERROR_CODE_SUCCESS) {
+        printf("[G04][ClassicHID] auto-reconnect hid_host_connect failed: 0x%02x\n", status);
+        classic_hid_schedule_reconnect_retry_on_core1();
+        return;
+    }
+
+    s_hid_host_cid = new_cid;
+}
+
+static void classic_hid_begin_auto_reconnect_on_core1(void)
+{
+    if (!s_has_remembered_device) {
+        classic_hid_start_inquiry_on_core1();
+        return;
+    }
+
+    s_auto_reconnect_active = true;
+    s_reconnect_attempt = 0;
+    classic_hid_cancel_reconnect_timer();
+    classic_hid_attempt_reconnect_on_core1();
+}
+
 static void classic_hid_prepare_pairing(const bd_addr_t address,
                                         bt_host_pairing_method_t method,
                                         uint32_t numeric_value,
                                         bool action_required)
 {
+    if (bd_addr_cmp(address, s_target_addr) != 0) {
+        return;
+    }
+
     memcpy(s_pairing_addr, address, sizeof(bd_addr_t));
     s_pairing_addr_valid = true;
     memset(&s_pairing_info, 0, sizeof(s_pairing_info));
@@ -431,7 +664,7 @@ static void classic_hid_enqueue_usb_report(const uint8_t *report, uint16_t repor
 
     memcpy(usb_report.report, &report[1], usb_report.report_len);
     if (!CMN_Enqueue(CMN_QUE_KIND_HID_RPT, &usb_report)) {
-        printf("[G03][ClassicHID] HID queue full; report dropped\n");
+        printf("[G04][ClassicHID] HID queue full; report dropped\n");
     }
 }
 
@@ -455,7 +688,10 @@ static void classic_hid_execute_pending_command(void)
     switch (command) {
         case CLASSIC_COMMAND_START_DISCOVERY:
             if (s_state == BT_HOST_STATE_DEVICE_SELECTION ||
-                s_state == BT_HOST_STATE_ERROR) {
+                s_state == BT_HOST_STATE_ERROR ||
+                s_state == BT_HOST_STATE_RECONNECTING ||
+                s_state == BT_HOST_STATE_CONNECTED ||
+                s_state == BT_HOST_STATE_READY) {
                 classic_hid_start_inquiry_on_core1();
             }
             break;
@@ -489,6 +725,7 @@ static void classic_hid_execute_pending_command(void)
                 (void)gap_ssp_passkey_negative(s_pairing_addr);
             }
             s_pairing_info.action_required = false;
+            s_auto_reconnect_active = false;
             s_state = BT_HOST_STATE_ERROR;
             break;
 
@@ -503,6 +740,10 @@ static void classic_hid_execute_pending_command(void)
             }
             break;
 
+        case CLASSIC_COMMAND_FORGET_DEVICE:
+            classic_hid_forget_remembered_on_core1();
+            break;
+
         case CLASSIC_COMMAND_NONE:
         default:
             break;
@@ -514,6 +755,16 @@ static void classic_hid_command_timer_handler(btstack_timer_source_t *timer)
     classic_hid_execute_pending_command();
     btstack_run_loop_set_timer(timer, CLASSIC_HID_COMMAND_POLL_MS);
     btstack_run_loop_add_timer(timer);
+}
+
+static void classic_hid_reconnect_timer_handler(btstack_timer_source_t *timer)
+{
+    UNUSED(timer);
+    s_reconnect_timer_scheduled = false;
+    s_reconnect_retry_delay_ms = 0;
+    if (s_auto_reconnect_active && s_state == BT_HOST_STATE_RECONNECTING) {
+        classic_hid_attempt_reconnect_on_core1();
+    }
 }
 
 static void classic_hid_packet_handler(uint8_t packet_type,
@@ -532,7 +783,12 @@ static void classic_hid_packet_handler(uint8_t packet_type,
     switch (hci_event_packet_get_type(packet)) {
         case BTSTACK_EVENT_STATE:
             if (btstack_event_state_get_state(packet) == HCI_STATE_WORKING) {
-                classic_hid_start_inquiry_on_core1();
+                classic_hid_load_remembered_on_core1();
+                if (s_has_remembered_device) {
+                    classic_hid_begin_auto_reconnect_on_core1();
+                } else {
+                    classic_hid_start_inquiry_on_core1();
+                }
             }
             break;
 
@@ -588,7 +844,11 @@ static void classic_hid_packet_handler(uint8_t packet_type,
 
         case HCI_EVENT_SIMPLE_PAIRING_COMPLETE:
             if (hci_event_simple_pairing_complete_get_status(packet) != ERROR_CODE_SUCCESS) {
-                s_state = BT_HOST_STATE_ERROR;
+                if (s_auto_reconnect_active) {
+                    classic_hid_schedule_reconnect_retry_on_core1();
+                } else {
+                    s_state = BT_HOST_STATE_ERROR;
+                }
             }
             break;
 
@@ -599,13 +859,14 @@ static void classic_hid_packet_handler(uint8_t packet_type,
                     bd_addr_t incoming_addr;
                     hid_subevent_incoming_connection_get_address(packet, incoming_addr);
 
-                    // Only the device explicitly selected by the UI may open an
-                    // incoming HID channel while its connection/pairing is active.
-                    const bool selected_device_matches =
+                    // Only the selected/remembered target may open an incoming HID
+                    // channel while a connection or pairing attempt is active.
+                    const bool target_matches =
                         bd_addr_cmp(incoming_addr, s_target_addr) == 0;
                     if ((s_state == BT_HOST_STATE_CONNECTING ||
+                         s_state == BT_HOST_STATE_RECONNECTING ||
                          s_state == BT_HOST_STATE_PAIRING) &&
-                        selected_device_matches) {
+                        target_matches) {
                         s_hid_host_cid = incoming_cid;
                         (void)hid_host_accept_connection(incoming_cid, HID_PROTOCOL_MODE_REPORT);
                     } else {
@@ -617,8 +878,12 @@ static void classic_hid_packet_handler(uint8_t packet_type,
                 case HID_SUBEVENT_CONNECTION_OPENED: {
                     const uint8_t status = hid_subevent_connection_opened_get_status(packet);
                     if (status != ERROR_CODE_SUCCESS) {
-                        classic_hid_clear_connection_state();
-                        s_state = BT_HOST_STATE_ERROR;
+                        if (s_auto_reconnect_active) {
+                            classic_hid_schedule_reconnect_retry_on_core1();
+                        } else {
+                            classic_hid_clear_connection_state();
+                            s_state = BT_HOST_STATE_ERROR;
+                        }
                         break;
                     }
                     s_hid_host_cid = hid_subevent_connection_opened_get_hid_cid(packet);
@@ -631,12 +896,21 @@ static void classic_hid_packet_handler(uint8_t packet_type,
                 case HID_SUBEVENT_DESCRIPTOR_AVAILABLE: {
                     const uint8_t status = hid_subevent_descriptor_available_get_status(packet);
                     if (status != ERROR_CODE_SUCCESS) {
-                        s_state = BT_HOST_STATE_ERROR;
+                        if (s_auto_reconnect_active) {
+                            classic_hid_schedule_reconnect_retry_on_core1();
+                        } else {
+                            s_state = BT_HOST_STATE_ERROR;
+                        }
                         break;
                     }
 
                     s_descriptor_available = true;
                     s_state = BT_HOST_STATE_READY;
+                    s_auto_reconnect_active = false;
+                    s_reconnect_attempt = 0;
+                    classic_hid_cancel_reconnect_timer();
+                    classic_hid_persist_target_on_core1();
+
                     // Core 0 clears stale reports before reconnecting USB and
                     // serves this descriptor directly from BTstack storage.
                     g_usb_reinit_request = true;
@@ -648,14 +922,29 @@ static void classic_hid_packet_handler(uint8_t packet_type,
                     break;
 
                 case HID_SUBEVENT_CONNECTION_CLOSED: {
+                    const bt_host_state_t state_before_close = s_state;
                     const bool had_descriptor = s_descriptor_available;
+                    const bool target_is_remembered = classic_hid_target_matches_remembered();
+                    const bool manual_scan_active =
+                        state_before_close == BT_HOST_STATE_DISCOVERING ||
+                        state_before_close == BT_HOST_STATE_RESOLVING_NAMES ||
+                        state_before_close == BT_HOST_STATE_DEVICE_SELECTION;
+
                     classic_hid_clear_connection_state();
                     if (had_descriptor) {
                         g_usb_reinit_request = true;
                     }
-                    // Persistent auto-reconnect is G04. G03 intentionally returns
-                    // to a fresh discovery/selection flow after a disconnect.
-                    classic_hid_start_inquiry_on_core1();
+
+                    if (manual_scan_active) {
+                        break;
+                    }
+
+                    if (target_is_remembered) {
+                        printf("[G04][ClassicHID] remembered HID disconnected; starting auto-reconnect\n");
+                        classic_hid_begin_auto_reconnect_on_core1();
+                    } else {
+                        classic_hid_start_inquiry_on_core1();
+                    }
                     break;
                 }
 
@@ -681,7 +970,7 @@ static void classic_hid_init(void)
     hci_set_inquiry_mode(INQUIRY_MODE_RSSI_AND_EIR);
 
     // The final product has an LCD plus confirmation buttons, so advertise the
-    // matching SSP capability now instead of silently auto-accepting pairing.
+    // matching SSP capability instead of silently auto-accepting pairing.
     gap_ssp_set_io_capability(SSP_IO_CAPABILITY_DISPLAY_YES_NO);
     gap_set_local_name("Pico Remapper 00:00:00:00:00:00");
     gap_discoverable_control(1);
@@ -692,6 +981,8 @@ static void classic_hid_init(void)
     btstack_run_loop_set_timer_handler(&s_command_timer, classic_hid_command_timer_handler);
     btstack_run_loop_set_timer(&s_command_timer, CLASSIC_HID_COMMAND_POLL_MS);
     btstack_run_loop_add_timer(&s_command_timer);
+
+    btstack_run_loop_set_timer_handler(&s_reconnect_timer, classic_hid_reconnect_timer_handler);
 
     hci_power_control(HCI_POWER_ON);
 }
@@ -740,6 +1031,7 @@ const char *CLASSIC_HID_GetStateName(void)
 {
     switch (s_state) {
         case BT_HOST_STATE_BOOTING: return "BOOTING";
+        case BT_HOST_STATE_RECONNECTING: return "RECONNECTING";
         case BT_HOST_STATE_DISCOVERING: return "SCANNING";
         case BT_HOST_STATE_RESOLVING_NAMES: return "RESOLVING";
         case BT_HOST_STATE_DEVICE_SELECTION: return "SELECT DEVICE";
@@ -844,10 +1136,56 @@ bool CLASSIC_HID_ConfirmSelectedDevice(void)
 
 bool CLASSIC_HID_StartDiscovery(void)
 {
-    if (s_state != BT_HOST_STATE_DEVICE_SELECTION && s_state != BT_HOST_STATE_ERROR) {
+    if (s_state != BT_HOST_STATE_DEVICE_SELECTION &&
+        s_state != BT_HOST_STATE_ERROR &&
+        s_state != BT_HOST_STATE_RECONNECTING &&
+        s_state != BT_HOST_STATE_CONNECTED &&
+        s_state != BT_HOST_STATE_READY) {
         return false;
     }
     return classic_hid_queue_command(CLASSIC_COMMAND_START_DISCOVERY, 0);
+}
+
+bool CLASSIC_HID_GetRememberedDevice(bt_host_device_t *out_device)
+{
+    if (out_device == NULL || !s_has_remembered_device) {
+        return false;
+    }
+
+    bt_persisted_hid_device_t remembered = s_remembered_device;
+    bd_addr_t address;
+    memcpy(address, remembered.address, sizeof(address));
+
+    memset(out_device, 0, sizeof(*out_device));
+    (void)snprintf(out_device->name, sizeof(out_device->name), "%s", remembered.name);
+    (void)snprintf(out_device->address,
+                   sizeof(out_device->address),
+                   "%s",
+                   bd_addr_to_str(address));
+    out_device->class_of_device = remembered.class_of_device;
+    out_device->rssi = CLASSIC_HID_RSSI_UNKNOWN;
+    out_device->kind = remembered.kind;
+    out_device->hid_candidate = true;
+    out_device->name_resolved = remembered.name[0] != '\0';
+    return true;
+}
+
+bt_host_reconnect_info_t CLASSIC_HID_GetReconnectInfo(void)
+{
+    bt_host_reconnect_info_t info = {0};
+    info.active = s_auto_reconnect_active;
+    info.attempt = s_reconnect_attempt;
+    info.max_attempts = CLASSIC_HID_RECONNECT_MAX_ATTEMPTS;
+    info.retry_delay_ms = s_reconnect_retry_delay_ms;
+    return info;
+}
+
+bool CLASSIC_HID_ForgetRememberedDevice(void)
+{
+    if (!s_has_remembered_device && !s_auto_reconnect_active) {
+        return false;
+    }
+    return classic_hid_queue_command(CLASSIC_COMMAND_FORGET_DEVICE, 0);
 }
 
 bt_host_pairing_info_t CLASSIC_HID_GetPairingInfo(void)
