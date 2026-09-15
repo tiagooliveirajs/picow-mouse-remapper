@@ -39,14 +39,16 @@ add_compile_options(-Wall
         -Wno-maybe-uninitialized
         )
 
-# Add executable.  
+# Add executable.
 add_executable(picow_ble_usb_hid_bridge
     main.c
     usb_descriptors.c
     hog_host_demo.c
     picow_bt_example_common.c
     Common.c
-    )  
+    AppLog.c
+    )
+
 target_link_libraries(picow_ble_usb_hid_bridge
     pico_stdlib
     pico_multicore
@@ -58,18 +60,24 @@ target_link_libraries(picow_ble_usb_hid_bridge
     pico_btstack_classic
     pico_btstack_cyw43
     pico_cyw43_arch_threadsafe_background
-    )   
+    )
+
 target_include_directories(picow_ble_usb_hid_bridge PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
     )
-target_compile_definitions(picow_ble_usb_hid_bridge PRIVATE 
+
+target_compile_definitions(picow_ble_usb_hid_bridge PRIVATE
     CYW43_LWIP=0
-    )    
-pico_btstack_make_gatt_header(picow_ble_usb_hid_bridge PRIVATE 
+    APP_FIRMWARE_VERSION="0.1.0-g01"
+    )
+
+pico_btstack_make_gatt_header(picow_ble_usb_hid_bridge PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/hog_host_demo.gatt
     )
 
-# disable usb output, enable uart output
+# Keep Pico SDK USB stdio disabled because the application owns the native USB
+# controller through TinyUSB. A TinyUSB CDC interface provides /dev/ttyACM*
+# diagnostics, while UART remains enabled as a fallback debug channel.
 pico_enable_stdio_usb(picow_ble_usb_hid_bridge 0)
 pico_enable_stdio_uart(picow_ble_usb_hid_bridge 1)
 
