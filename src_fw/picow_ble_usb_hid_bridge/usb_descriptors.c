@@ -20,7 +20,6 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
- *
  */
 
 #include "bsp/board_api.h"
@@ -54,10 +53,12 @@ tusb_desc_device_t const desc_device =
 {
     .bLength                = sizeof(tusb_desc_device_t),
     .bDescriptorType        = TUSB_DESC_DEVICE,
+    // CDC uses an Interface Association Descriptor (IAD), so expose the
+    // composite device class recommended for IAD-based USB devices.
     .bcdUSB                 = USB_BCD,
-    .bDeviceClass           = 0x00,
-    .bDeviceSubClass        = 0x00,
-    .bDeviceProtocol        = 0x00,
+    .bDeviceClass           = TUSB_CLASS_MISC,
+    .bDeviceSubClass        = MISC_SUBCLASS_COMMON,
+    .bDeviceProtocol        = MISC_PROTOCOL_IAD,
     .bMaxPacketSize0        = CFG_TUD_ENDPOINT0_SIZE,
 
     .idVendor               = USB_VID,
@@ -104,7 +105,7 @@ uint8_t const * tud_hid_descriptor_report_cb(uint8_t instance)
     } else {
         // When not connected, return the default descriptor
         return desc_hid_report;
-    }   
+    }
     // <=====
 }
 
@@ -114,31 +115,28 @@ uint8_t const * tud_hid_descriptor_report_cb(uint8_t instance)
 
 enum
 {
+    ITF_NUM_CDC,
+    ITF_NUM_CDC_DATA,
     ITF_NUM_HID,
     ITF_NUM_TOTAL
 };
 
-#define     CONFIG_TOTAL_LEN    (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN)
+#define CONFIG_TOTAL_LEN    (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_HID_DESC_LEN)
 
-#define EPNUM_HID   0x81
+#define EPNUM_CDC_NOTIF 0x81
+#define EPNUM_CDC_OUT   0x02
+#define EPNUM_CDC_IN    0x82
+#define EPNUM_HID       0x83
 
-// @@chg
-// =====>
-#if 0
-uint8_t const desc_configuration[] =
+// The CDC portion is fixed. The HID portion remains dynamic because the BLE
+// report descriptor length changes after a HID-over-GATT device is connected.
+static uint8_t const desc_cdc[] =
 {
-    // Config number, interface count, string index, total length, attribute, power in mA
-    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
-
-    // Interface number, string index, protocol, report descriptor len, EP In address, size & polling interval
-    TUD_HID_DESCRIPTOR(ITF_NUM_HID, 0, HID_ITF_PROTOCOL_NONE, sizeof(desc_hid_report), EPNUM_HID, CFG_TUD_HID_EP_BUFSIZE, 5)
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 0, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, 64)
 };
-#endif
-#define DYNAMIC_CONFIG_BUF_SIZE (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN)
-// Align the buffer to 4 bytes to ensure efficient and safe access
-static uint8_t desc_configuration[DYNAMIC_CONFIG_BUF_SIZE] __attribute__((aligned(4)));
-// <=====
 
+#define DYNAMIC_CONFIG_BUF_SIZE CONFIG_TOTAL_LEN
+static uint8_t desc_configuration[DYNAMIC_CONFIG_BUF_SIZE] __attribute__((aligned(4)));
 
 // Invoked when received GET CONFIGURATION DESCRIPTOR
 // Application return pointer to descriptor
@@ -147,14 +145,11 @@ uint8_t const * tud_descriptor_configuration_cb(uint8_t index)
 {
     (void) index; // for multiple configurations
 
-    // This example use the same configuration for both high and full speed mode
-    // @@add
-    // =====>
-    // Pointer to the current position in the descriptor buffer
+    // This example uses the same configuration for both high and full speed mode.
     uint8_t *p_desc = desc_configuration;
     uint8_t const * const desc_end = p_desc + DYNAMIC_CONFIG_BUF_SIZE;
 
-    // Determine which report descriptor to use
+    // Determine which report descriptor to use.
     uint16_t report_desc_len;
     if (is_ble_app_state_ready() && get_ble_hid_report_descriptor_len() > 0) {
         report_desc_len = get_ble_hid_report_descriptor_len();
@@ -162,21 +157,26 @@ uint8_t const * tud_descriptor_configuration_cb(uint8_t index)
         report_desc_len = sizeof(desc_hid_report);
     }
 
-    // 1. Build Configuration Descriptor
+    // 1. Build Configuration Descriptor.
     tusb_desc_configuration_t *config_desc = (tusb_desc_configuration_t*) p_desc;
     config_desc->bLength = sizeof(tusb_desc_configuration_t);
     config_desc->bDescriptorType = TUSB_DESC_CONFIGURATION;
-    // wTotalLength will be set later
-    // config_desc->wTotalLength is set at the end or calculated dynamically
+    config_desc->wTotalLength = 0; // filled after all interfaces are appended
     config_desc->bNumInterfaces = ITF_NUM_TOTAL;
     config_desc->bConfigurationValue = 1;
     config_desc->iConfiguration = 0;
     config_desc->bmAttributes = TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP;
-    // Request 500mA (250 * 2mA) to ensure sufficient power for Pico W (WiFi/BLE)
+    // Request 500mA (250 * 2mA) to ensure sufficient power for Pico W (WiFi/BLE).
     config_desc->bMaxPower = 250;
     p_desc += sizeof(tusb_desc_configuration_t);
 
-    // 2. Build HID Interface Descriptor
+    // 2. Append the fixed CDC control/data interfaces.
+    TU_ASSERT((size_t)(desc_end - p_desc) >= sizeof(desc_cdc), NULL);
+    memcpy(p_desc, desc_cdc, sizeof(desc_cdc));
+    p_desc += sizeof(desc_cdc);
+
+    // 3. Build HID Interface Descriptor.
+    TU_ASSERT((size_t)(desc_end - p_desc) >= TUD_HID_DESC_LEN, NULL);
     tusb_desc_interface_t *if_desc = (tusb_desc_interface_t*) p_desc;
     if_desc->bLength = sizeof(tusb_desc_interface_t);
     if_desc->bDescriptorType = TUSB_DESC_INTERFACE;
@@ -189,7 +189,7 @@ uint8_t const * tud_descriptor_configuration_cb(uint8_t index)
     if_desc->iInterface = 0;
     p_desc += sizeof(tusb_desc_interface_t);
 
-    // 3. Build HID Descriptor
+    // 4. Build HID Descriptor.
     // Use tu_unaligned_write16() for fields that might not be aligned.
     *p_desc++ = 9; // bLength
     *p_desc++ = HID_DESC_TYPE_HID; // bDescriptorType
@@ -198,13 +198,9 @@ uint8_t const * tud_descriptor_configuration_cb(uint8_t index)
     *p_desc++ = 1; // bNumDescriptors
     *p_desc++ = HID_DESC_TYPE_REPORT; // bDescriptorType
     tu_unaligned_write16(p_desc, report_desc_len); p_desc += 2; // wDescriptorLength
-    
-    // 4. Build Endpoint Descriptor
-    tusb_desc_endpoint_t *ep_desc = (tusb_desc_endpoint_t*) p_desc;
-    // Set wTotalLength
-    // Use tu_htole16 for portability (though RP2040 is little-endian)
-    config_desc->wTotalLength = tu_htole16((uint16_t)(p_desc - desc_configuration) + sizeof(tusb_desc_endpoint_t));
 
+    // 5. Build HID IN Endpoint Descriptor.
+    tusb_desc_endpoint_t *ep_desc = (tusb_desc_endpoint_t*) p_desc;
     ep_desc->bLength = sizeof(tusb_desc_endpoint_t);
     ep_desc->bDescriptorType = TUSB_DESC_ENDPOINT;
     ep_desc->bEndpointAddress = EPNUM_HID;
@@ -214,7 +210,9 @@ uint8_t const * tud_descriptor_configuration_cb(uint8_t index)
     p_desc += sizeof(tusb_desc_endpoint_t);
 
     TU_ASSERT(p_desc <= desc_end, NULL);
-    // <=====
+    TU_ASSERT((size_t)(p_desc - desc_configuration) == DYNAMIC_CONFIG_BUF_SIZE, NULL);
+
+    config_desc->wTotalLength = tu_htole16((uint16_t)(p_desc - desc_configuration));
 
     return desc_configuration;
 }
@@ -234,10 +232,10 @@ enum {
 // array of pointer to string descriptors
 char const *string_desc_arr[] =
 {
-    (const char[]) { 0x09, 0x04 }, // 0: is supported language is English (0x0409)
+    (const char[]) { 0x09, 0x04 }, // 0: supported language is English (0x0409)
     "TinyUSB",                     // 1: Manufacturer
-    "TinyUSB Device",              // 2: Product
-    NULL,                          // 3: Serials will use unique ID if possible
+    "Pico W HID Remapper",         // 2: Product
+    NULL,                          // 3: Serial will use unique ID if possible
 };
 
 static uint16_t _desc_str[32 + 1];
@@ -259,19 +257,15 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
             break;
 
         default:
-            // Note: the 0xEE index string is a Microsoft OS 1.0 Descriptors.
-            // https://docs.microsoft.com/en-us/windows-hardware/drivers/usbcon/microsoft-defined-usb-descriptors
-
+            // Note: the 0xEE index string is a Microsoft OS 1.0 Descriptor.
             if ( !(index < sizeof(string_desc_arr) / sizeof(string_desc_arr[0])) ) return NULL;
 
             const char *str = string_desc_arr[index];
-
-            // Cap at max char
             chr_count = strlen(str);
-            size_t const max_count = sizeof(_desc_str) / sizeof(_desc_str[0]) - 1; // -1 for string type
+            size_t const max_count = sizeof(_desc_str) / sizeof(_desc_str[0]) - 1;
             if ( chr_count > max_count ) chr_count = max_count;
 
-            // Convert ASCII string into UTF-16
+            // Convert ASCII string into UTF-16.
             for ( size_t i = 0; i < chr_count; i++ ) {
                 _desc_str[1 + i] = str[i];
             }

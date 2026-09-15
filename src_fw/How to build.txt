@@ -1,25 +1,75 @@
 [Prerequisites]
 
-Install the "Raspberry Pi Pico" extension in Visual Studio Code (VS Code) on Windows. 
-*Confirmed to work with the following versions:
+Firmware target: Raspberry Pi Pico W
+Pico SDK: 2.2.0
 
-VS Code: 1.107.1
-
-Raspberry Pi Pico extension: 0.19.0
+The firmware can be built either with the Raspberry Pi Pico VS Code extension or directly with CMake.
 
 
-[Build Steps]
+[Build with VS Code]
 
 1. Open a new VS Code window.
 
-2. Click "Import Project" via the Raspberry Pi Pico extension.
+2. Install/open the "Raspberry Pi Pico" extension.
 
-3. Select the "picow_ble_usb_hid_bridge" folder (where the FW source files are located) for "Location".
+3. Click "Import Project".
 
-4. Select "v2.2.0" for "Select Pico SDK version".
+4. Select the "picow_ble_usb_hid_bridge" folder (where the firmware source files are located) for "Location".
 
-5. Click "Import".
+5. Select "v2.2.0" for "Select Pico SDK version".
 
-6. Select "Release" or "Debug" as needed for "Switch Build Type".
+6. Click "Import".
 
-7. Click "Compile Project" to start the build.
+7. Select "Release" or "Debug" as needed for "Switch Build Type".
+
+8. Click "Compile Project".
+
+Expected output:
+
+    picow_ble_usb_hid_bridge.uf2
+
+
+[Build on Linux with CMake]
+
+Requirements:
+
+- cmake
+- ninja-build (optional, but recommended)
+- gcc-arm-none-eabi
+- Raspberry Pi Pico SDK 2.2.0 with submodules initialized
+
+Example:
+
+    export PICO_SDK_PATH="$HOME/pico/pico-sdk"
+    cmake -S src_fw/picow_ble_usb_hid_bridge \
+          -B build/picow_ble_usb_hid_bridge \
+          -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release
+    cmake --build build/picow_ble_usb_hid_bridge --parallel
+
+Expected output:
+
+    build/picow_ble_usb_hid_bridge/picow_ble_usb_hid_bridge.uf2
+
+
+[Gate 01 diagnostics]
+
+The native USB device is a composite device with:
+
+- HID interface used by the BLE-to-USB bridge.
+- CDC ACM diagnostic interface used for firmware logs.
+
+On Linux the diagnostic interface should appear as /dev/ttyACM*.
+The Pico SDK USB stdio backend remains disabled because TinyUSB owns the native USB controller directly. UART stdio remains enabled as a fallback debug channel.
+
+Example serial monitor:
+
+    ls -l /dev/ttyACM*
+    picocom -b 115200 /dev/ttyACM0
+
+Opening the CDC device should print a Gate 01 firmware banner.
+
+
+[Continuous Integration]
+
+.github/workflows/firmware-build.yml builds the firmware with Pico SDK 2.2.0 on pushes and pull requests that change src_fw. The workflow also verifies that the UF2 file was generated and uploads the UF2/ELF/MAP files as an artifact.
