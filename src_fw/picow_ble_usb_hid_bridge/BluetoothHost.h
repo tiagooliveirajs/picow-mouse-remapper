@@ -26,6 +26,10 @@ bool BT_HOST_SelectPreviousDevice(void);
 bool BT_HOST_ConfirmSelectedDevice(void);
 bool BT_HOST_StartDiscovery(void);
 
+bool BT_HOST_GetRememberedDevice(bt_host_device_t *out_device);
+bt_host_reconnect_info_t BT_HOST_GetReconnectInfo(void);
+bool BT_HOST_ForgetRememberedDevice(void);
+
 bt_host_pairing_info_t BT_HOST_GetPairingInfo(void);
 bool BT_HOST_ConfirmPairing(bool accept);
 bool BT_HOST_SubmitPasskey(uint32_t passkey);
