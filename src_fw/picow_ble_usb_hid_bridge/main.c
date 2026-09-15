@@ -20,172 +20,113 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
- *
  */
 
 #include "bsp/board_api.h"
 #include "tusb.h"
-// @@add
-// =====>
-#include "AppLog.h"
-#include "Common.h"
-// <=====
 
-//--------------------------------------------------------------------+
-// MACROS
-//--------------------------------------------------------------------+
-// @@add
-// =====>
+#include "AppLog.h"
+#include "BluetoothHost.h"
+#include "Common.h"
+
 #define USB_REINIT_STABILIZATION_DELAY 100 // ms
 #define LED_BLINKING_INTERVAL 200 // ms
-// <=====
-//--------------------------------------------------------------------+
-// GLOBAL VARIABLES
-//--------------------------------------------------------------------+
-// @@add
-// =====>
-volatile bool g_usb_reinit_request = false; // Flag to request USB re-initialization when BLE HID connection is established
-// <=====
 
-//--------------------------------------------------------------------+
-// FUNCTION PROTOTYPES
-//--------------------------------------------------------------------+
-// @@add
-// =====>
+volatile bool g_usb_reinit_request = false;
+
 void usb_dev_main(void);
 void hid_task(void);
 void led_blinking_task(void);
 bool send_hid_report(void);
 
-extern bool is_ble_app_state_ready(void);
-extern void ble_host_main(void);
-// <=====
-
-/*------------- MAIN -------------*/
 int main(void)
 {
     board_init();
 
-    // init device stack on configured roothub port
     tud_init(BOARD_TUD_RHPORT);
-
     if (board_init_after_tusb) {
         board_init_after_tusb();
     }
 
-    // @@chg
-    // =====>
     stdio_init_all();
     APP_LOG_Init();
     APP_LOG_PrintBootBanner();
 
     CMN_Init();
-    APP_LOG_Info("common queue initialized");
+    APP_LOG_Info("common HID queue initialized");
 
-    // Initialize to lock out CPU Core 0 when btstack writes to flash memory on CPU Core 1
+    // BTstack can write link keys from Core 1. Register Core 0 so flash-safe
+    // execution coordinates both cores.
     flash_safe_execute_core_init();
     APP_LOG_Info("flash-safe multicore support initialized");
 
-    multicore_launch_core1(ble_host_main);
-    APP_LOG_Info("BLE host launched on Core 1");
-    APP_LOG_Info("USB device loop starting on Core 0");
+    multicore_launch_core1(BT_HOST_CoreMain);
+    APP_LOG_Info("Bluetooth host launched on Core 1 (%s)", BT_HOST_GetTransportName());
+    APP_LOG_Info("USB HID/CDC loop starting on Core 0");
 
     usb_dev_main();
-
     return 0;
-    // <=====
 }
 
-// @@add
-// =====>
-//--------------------------------------------------------------------+
-// Main loop for the USB device (runs on Core0).
-//--------------------------------------------------------------------+
-// This function loops indefinitely, handling USB events, diagnostics, LED
-// blinking, and HID tasks. It also handles USB re-initialization requests from
-// Core1.
 void usb_dev_main(void)
 {
     while (1)
     {
-        // Check for USB re-initialization request from Core1 (BLE host)
         if (g_usb_reinit_request) {
             g_usb_reinit_request = false;
-            APP_LOG_Info("BLE HID descriptor ready; re-enumerating USB device");
+            APP_LOG_Info("Bluetooth HID descriptor changed; re-enumerating USB device");
 
             if (tud_mounted()) {
-                tud_disconnect(); // Disconnect the USB device
-                board_delay(USB_REINIT_STABILIZATION_DELAY); // Wait a bit for stabilization
+                tud_disconnect();
+                board_delay(USB_REINIT_STABILIZATION_DELAY);
             }
-            // Clear any pending HID reports from the queue before reconnecting.
+
+            // Reports queued for a previous HID descriptor must never be sent
+            // after USB re-enumeration.
             CMN_ClearQueue(CMN_QUE_KIND_HID_RPT);
             tud_connect();
         }
 
-        tud_task();          // Run TinyUSB device task
-        APP_LOG_Task();      // Service CDC diagnostics
-        led_blinking_task(); // Run LED blinking task
-        hid_task();          // Run HID report sending task
+        tud_task();
+        APP_LOG_Task();
+        led_blinking_task();
+        hid_task();
     }
 }
-// <=====
 
-//--------------------------------------------------------------------+
-// Device callbacks
-//--------------------------------------------------------------------+
-
-// Invoked when device is mounted
 void tud_mount_cb(void)
 {
     APP_LOG_Info("USB mounted by host");
 }
 
-// Invoked when device is unmounted
 void tud_umount_cb(void)
 {
     APP_LOG_Info("USB unmounted from host");
 }
 
-// Invoked when usb bus is suspended
-// remote_wakeup_en : if host allow us  to perform remote wakeup
-// Within 7ms, device must draw an average of current less than 2.5 mA from bus
 void tud_suspend_cb(bool remote_wakeup_en)
 {
     APP_LOG_Info("USB suspended (remote wakeup=%s)", remote_wakeup_en ? "enabled" : "disabled");
 }
 
-// Invoked when usb bus is resumed
 void tud_resume_cb(void)
 {
     APP_LOG_Info("USB resumed");
 }
 
-//--------------------------------------------------------------------+
-// USB HID
-//--------------------------------------------------------------------+
-
-// @@chg
-// =====>
-// Dequeue and send one HID report from the queue to the USB host.
-// return true if a report was successfully sent, false otherwise.
 bool send_hid_report(void)
 {
-    static ST_HID_RPT stHidRpt; // Change local variable to static to use static memory (data area) instead of stack, preventing stack overflow.
+    static ST_HID_RPT stHidRpt;
     bool bRet = false;
 
-    // Peek at the next report in the queue without removing it yet
     if (CMN_PeekQueue(CMN_QUE_KIND_HID_RPT, &stHidRpt)) {
-        // If the host is suspended, wake it up and exit.
-        // The report will be sent on a subsequent call after the host resumes.
-        if ( tud_suspended()) {
+        if (tud_suspended()) {
             tud_remote_wakeup();
             return bRet;
         }
-        // If the HID interface is ready, try to send the report
+
         if (tud_hid_ready()) {
-            // Try to send the report
             if (tud_hid_report(0, stHidRpt.report, stHidRpt.report_len)) {
-                // If sent successfully, remove the report from the queue
                 CMN_AdvanceQueue(CMN_QUE_KIND_HID_RPT);
                 bRet = true;
             }
@@ -194,86 +135,62 @@ bool send_hid_report(void)
 
     return bRet;
 }
-// <=====
 
-//--------------------------------------------------------------------+
-// HID TASK
-//--------------------------------------------------------------------+
 void hid_task(void)
 {
-    // @@chg
-    // =====>
-    // Dequeue and send one HID report.
     (void)send_hid_report();
-    // <=====
 }
 
-// Invoked when sent REPORT successfully to host
-// Application can use this to send the next report
-// Note: For composite reports, report[0] is report ID
 void tud_hid_report_complete_cb(uint8_t instance, uint8_t const* report, uint16_t len)
 {
     (void) instance;
     (void) len;
-    // @@chg
-    // =====>
     (void) report;
-    // <=====
 }
 
-// Invoked when received GET_REPORT control request
-// Application must fill buffer report's content and return its length.
-// Return zero will cause the stack to STALL request
-uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen)
+uint16_t tud_hid_get_report_cb(uint8_t instance,
+                               uint8_t report_id,
+                               hid_report_type_t report_type,
+                               uint8_t* buffer,
+                               uint16_t reqlen)
 {
-    // TODO not Implemented
     (void) instance;
     (void) report_id;
     (void) report_type;
     (void) buffer;
     (void) reqlen;
-
     return 0;
 }
 
-// Invoked when received SET_REPORT control request or
-// received data on OUT endpoint ( Report ID = 0, Type = 0 )
-void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize)
+void tud_hid_set_report_cb(uint8_t instance,
+                           uint8_t report_id,
+                           hid_report_type_t report_type,
+                           uint8_t const* buffer,
+                           uint16_t bufsize)
 {
     (void) instance;
-    // @@chg
-    // =====>
     (void) report_id;
     (void) report_type;
     (void) buffer;
     (void) bufsize;
-    // <=====
 }
 
-//--------------------------------------------------------------------+
-// BLINKING TASK
-//--------------------------------------------------------------------+
 void led_blinking_task(void)
 {
     static uint32_t start_ms = 0;
     static bool led_state = false;
-    // @@chg
-    // =====>
     const uint32_t blink_interval = LED_BLINKING_INTERVAL;
 
-    if (is_ble_app_state_ready()) {
-        // Turn on LED when in READY state
+    if (BT_HOST_IsReady()) {
         if (!led_state) {
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
             led_state = true;
         }
     } else {
-        // Blink every 200ms when not in READY state
-        if ( board_millis() - start_ms < blink_interval) return; // not enough time
+        if (board_millis() - start_ms < blink_interval) return;
         start_ms += blink_interval;
 
         led_state = !led_state;
         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, led_state);
     }
-    // <=====
 }
