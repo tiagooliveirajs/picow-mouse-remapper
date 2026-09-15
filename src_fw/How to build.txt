@@ -1,6 +1,6 @@
 [Prerequisites]
 
-Firmware target: Raspberry Pi Pico W
+Firmware target: Raspberry Pi Pico 2 W (RP2350)
 Pico SDK: 2.2.0
 
 The firmware can be built either with the Raspberry Pi Pico VS Code extension or directly with CMake.
@@ -9,20 +9,14 @@ The firmware can be built either with the Raspberry Pi Pico VS Code extension or
 [Build with VS Code]
 
 1. Open a new VS Code window.
-
 2. Install/open the "Raspberry Pi Pico" extension.
-
 3. Click "Import Project".
-
-4. Select the "picow_ble_usb_hid_bridge" folder (where the firmware source files are located) for "Location".
-
+4. Select the "picow_ble_usb_hid_bridge" folder for "Location".
 5. Select "v2.2.0" for "Select Pico SDK version".
-
-6. Click "Import".
-
-7. Select "Release" or "Debug" as needed for "Switch Build Type".
-
-8. Click "Compile Project".
+6. Select Raspberry Pi Pico 2 W / pico2_w as the board.
+7. Click "Import".
+8. Select "Release" or "Debug" as needed.
+9. Click "Compile Project".
 
 Expected output:
 
@@ -44,6 +38,7 @@ Example:
     cmake -S src_fw/picow_ble_usb_hid_bridge \
           -B build/picow_ble_usb_hid_bridge \
           -G Ninja \
+          -DPICO_BOARD=pico2_w \
           -DCMAKE_BUILD_TYPE=Release
     cmake --build build/picow_ble_usb_hid_bridge --parallel
 
@@ -51,25 +46,36 @@ Expected output:
 
     build/picow_ble_usb_hid_bridge/picow_ble_usb_hid_bridge.uf2
 
+The CMake project rejects other board targets intentionally. The Classic HID POC that Gate 02 incorporates was validated on the project's RP2350 / Pico 2 W hardware.
 
-[Gate 01 diagnostics]
 
-The native USB device is a composite device with:
+[Gate 02 Bluetooth architecture]
 
-- HID interface used by the BLE-to-USB bridge.
-- CDC ACM diagnostic interface used for firmware logs.
+Core 0:
 
-On Linux the diagnostic interface should appear as /dev/ttyACM*.
-The Pico SDK USB stdio backend remains disabled because TinyUSB owns the native USB controller directly. UART stdio remains enabled as a fallback debug channel.
+    TinyUSB HID + CDC -> HID queue -> USB host
 
-Example serial monitor:
+Core 1:
 
-    ls -l /dev/ttyACM*
-    picocom -b 115200 /dev/ttyACM0
+    BluetoothHost -> Classic HID Host -> HID queue
 
-Opening the CDC device should print a Gate 01 firmware banner.
+The original BLE HOG implementation remains compiled in the firmware, but Gate 02 selects Bluetooth Classic HID as the default transport. USB descriptor handling now uses the generic BluetoothHost facade instead of calling BLE-specific functions directly.
+
+The Gate 02 Classic implementation preserves the BKB-3G POC target names:
+
+    Bluetooth keyboard 3.0
+    BKB-3G
+
+Device discovery/selection will become generic in Gate 03.
+
+Classic pairing state and passkey values are retained in memory through ClassicHidHost accessors so a later LCD GUI can present the complete pairing flow without requiring a terminal.
+
+
+[Manual validation policy]
+
+Manual terminal-based validation is not required for this project. Physical interaction tests will be performed through the LCD/HAT GUI once that interface is available. Until then, gates rely on reproducible firmware compilation and generated UF2 artifacts plus code-level integration checks.
 
 
 [Continuous Integration]
 
-.github/workflows/firmware-build.yml builds the firmware with Pico SDK 2.2.0 on pushes and pull requests that change src_fw. The workflow also verifies that the UF2 file was generated and uploads the UF2/ELF/MAP files as an artifact.
+.github/workflows/firmware-build.yml builds the Pico 2 W firmware with Pico SDK 2.2.0 on pushes and pull requests that change src_fw. The workflow verifies the UF2 output and uploads UF2/ELF/MAP artifacts.
