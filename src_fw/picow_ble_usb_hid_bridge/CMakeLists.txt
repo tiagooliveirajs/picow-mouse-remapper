@@ -18,8 +18,6 @@ if (EXISTS ${picoVscode})
 endif()
 
 # The Classic HID POC was physically validated on the project's RP2350 board.
-# Keep the production firmware on the same target to avoid generating an RP2040
-# image that can be flashed accidentally to the Pico 2 W.
 set(PICO_BOARD pico2_w CACHE STRING "Board type")
 if(NOT PICO_BOARD STREQUAL "pico2_w")
     message(FATAL_ERROR
@@ -45,11 +43,11 @@ add_executable(picow_ble_usb_hid_bridge
     Common.c
     AppLog.c
     BluetoothHost.c
+    BluetoothUiController.c
     ClassicHidHost.c
 
-    # Existing BLE HOG implementation is intentionally retained and compiled.
-    # BluetoothHost selects Classic HID for G02; a later UI gate can select the
-    # transport without re-coupling USB code to either implementation.
+    # Existing BLE HOG implementation remains compiled. BluetoothHost selects
+    # Classic HID for G03 while keeping the USB/application side transport-neutral.
     hog_host_demo.c
     picow_bt_example_common.c
 )
@@ -73,8 +71,8 @@ target_include_directories(picow_ble_usb_hid_bridge PRIVATE
 
 target_compile_definitions(picow_ble_usb_hid_bridge PRIVATE
     CYW43_LWIP=0
-    APP_FIRMWARE_VERSION="0.2.0-g02"
-    APP_GATE_NAME="G02"
+    APP_FIRMWARE_VERSION="0.3.0-g03"
+    APP_GATE_NAME="G03"
     APP_BT_DEFAULT_CLASSIC=1
 )
 
