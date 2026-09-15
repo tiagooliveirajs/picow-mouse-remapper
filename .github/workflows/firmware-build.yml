@@ -14,7 +14,7 @@ on:
       - '.github/workflows/firmware-build.yml'
 
 jobs:
-  build-pico-w:
+  build-pico2-w:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -43,7 +43,7 @@ jobs:
             https://github.com/raspberrypi/pico-sdk.git \
             .pico-sdk
 
-      - name: Configure firmware
+      - name: Configure Pico 2 W firmware
         env:
           PICO_SDK_PATH: ${{ github.workspace }}/.pico-sdk
         run: |
@@ -51,6 +51,7 @@ jobs:
             -S src_fw/picow_ble_usb_hid_bridge \
             -B build/firmware \
             -G Ninja \
+            -DPICO_BOARD=pico2_w \
             -DCMAKE_BUILD_TYPE=Release
 
       - name: Build firmware
@@ -62,7 +63,7 @@ jobs:
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: picow-ble-usb-hid-bridge
+          name: pico2w-remapper-g02
           path: |
             build/firmware/picow_ble_usb_hid_bridge.uf2
             build/firmware/picow_ble_usb_hid_bridge.elf
